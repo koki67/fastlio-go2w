@@ -1,0 +1,9 @@
+[submodule "humble_ws/src/livox_ros_driver2"]
+	path = humble_ws/src/livox_ros_driver2
+	url = https://github.com/Livox-SDK/livox_ros_driver2.git
+	branch = master
+
+[submodule "humble_ws/src/FAST_LIO"]
+	path = humble_ws/src/FAST_LIO
+	url = https://github.com/hku-mars/FAST_LIO.git
+	branch = ROS2

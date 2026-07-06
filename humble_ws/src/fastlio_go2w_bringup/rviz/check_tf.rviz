@@ -1,0 +1,79 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Selection
+    Name: Selection
+  - Class: rviz_common/Tool Properties
+    Name: Tool Properties
+  - Class: rviz_common/Views
+    Name: Views
+  - Class: rviz_common/Time
+    Name: Time
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Name: TF
+      Frame Timeout: 60
+      Frames:
+        All Enabled: true
+      Marker Scale: 1
+      Show Arrows: true
+      Show Axes: true
+      Show Names: true
+      Update Interval: 0
+    - Class: rviz_default_plugins/RobotModel
+      Alpha: 1
+      Enabled: true
+      Name: RobotModel
+      Robot Description: robot_description
+      Update Interval: 0
+    - Class: rviz_default_plugins/Axes
+      Enabled: true
+      Name: base_link
+      Reference Frame: base_link
+      Length: 0.3
+      Radius: 0.05
+      Show Trail: false
+      Value: false
+    - Class: rviz_default_plugins/Axes
+      Enabled: true
+      Name: livox_frame
+      Reference Frame: livox_frame
+      Length: 0.2
+      Radius: 0.03
+      Show Trail: false
+      Value: false
+    - Class: rviz_default_plugins/Axes
+      Enabled: true
+      Name: livox_imu_frame
+      Reference Frame: livox_imu_frame
+      Length: 0.2
+      Radius: 0.03
+      Show Trail: false
+      Value: false
+  Enabled: true
+  Global Options:
+    Background Color: 0; 0; 0
+    Fixed Frame: base_link
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 2
+      Focal Point:
+        X: 0.0
+        Y: 0.0
+        Z: 0.0
+      Name: Current View
+      Pitch: 0.8
+      Target Frame: base_link
+      Yaw: 1.0

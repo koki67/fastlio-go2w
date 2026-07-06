@@ -1,0 +1,14 @@
+bags/*
+humble_ws/build/
+humble_ws/install/
+humble_ws/log/
+humble_ws/.colcon/
+.devcontainer/desktop_ws/
+*.pyc
+*.swp
+*.swo
+*.so
+__pycache__/
+.pytest_cache/
+.venv/
+.vscode/
