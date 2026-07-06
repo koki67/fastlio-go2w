@@ -18,8 +18,8 @@ extrinsics:
     translation: [0.211, 0.0, 0.2008]
     rotation_quaternion: [0.0, 0.15883, 0.0, 0.987306]  # pitch +18.278°
   T_baselink_imu:
-    translation: [0.011, 0.02329, -0.04412]
-    rotation_quaternion: [0.0, 0.0, 0.0, 1.0]
+    translation: [0.207608, 0.02329, 0.155456]
+    rotation_quaternion: [0.0, 0.15883, 0.0, 0.987306]
   T_lidar_imu:
     translation: [0.011, 0.02329, -0.04412]
     rotation_quaternion: [0.0, 0.0, 0.0, 1.0]
@@ -29,5 +29,5 @@ network:
   lidar_ip: 192.168.123.40
 
 notes:
-  - "T_baselink_imu is inverse of FAST-LIO FAST_LIO mapping extrinsic_T values."
+  - "T_baselink_imu is base_link->livox_imu composed from base_link->livox_frame and livox_frame->livox_imu offsets."
   - "lidar→imu translation is [0.011, 0.02329, -0.04412] per planned setup."

@@ -101,19 +101,22 @@ class OdomAdapter(Node):
         if self._base_to_imu is None:
             self._refresh_base_to_imu()
             if self._base_to_imu is None:
-                self.get_logger().warn_throttle(
-                    1.0,
+                self.get_logger().warn(
                     "Skipping /Odometry: base->imu TF not ready.",
+                    throttle_duration_sec=1.0,
                 )
                 return
 
         msg_time = Time.from_msg(msg.header.stamp)
         if msg_time == self._last_stamp:
-            self.get_logger().warn_throttle(1.0, "Skipping duplicate /Odometry stamp.")
+            self.get_logger().warn(
+                "Skipping duplicate /Odometry stamp.",
+                throttle_duration_sec=1.0,
+            )
             return
         self._last_stamp = msg_time
 
-        body_matrix = pose_matrix_from_pose_msg(msg.pose.pose.pose)
+        body_matrix = pose_matrix_from_pose_msg(msg.pose.pose)
         base_matrix = rebase_transform_fastlio_to_base(body_matrix, self._base_to_imu)
 
         out = Odometry()

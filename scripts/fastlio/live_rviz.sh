@@ -81,7 +81,7 @@ if [ ! -d "/sys/class/net/$iface" ]; then
     exit 1
 fi
 
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
 export CYCLONEDDS_URI="<CycloneDDS><Domain><General><Interfaces>
   <NetworkInterface name=\"$iface\" priority=\"2\" multicast=\"true\" />
 </Interfaces></General></Domain></CycloneDDS>"

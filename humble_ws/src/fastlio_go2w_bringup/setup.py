@@ -22,9 +22,5 @@ setup(
     description="FAST-LIO + Livox MID-360 bringup for GO2-W.",
     license="MIT",
     tests_require=["pytest", "numpy"],
-    entry_points={
-        "console_scripts": [
-            "fastlio_odom_adapter = fastlio_go2w_bringup.odom_adapter:main",
-        ],
-    },
+
 )

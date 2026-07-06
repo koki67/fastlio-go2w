@@ -19,6 +19,8 @@ fi
 
 bash "$REPO_ROOT/.devcontainer/configure_git_safe_directory.sh"
 
+bash "$REPO_ROOT/scripts/setup_ws.sh"
+
 source "$ROS_SETUP"
 
 mkdir -p "$DESKTOP_WS_ROOT"

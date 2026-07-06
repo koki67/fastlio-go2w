@@ -2,7 +2,7 @@
 # Replay a raw FAST-LIO bag and optionally visualize output.
 #
 # Usage:
-#   bash scripts/fastlio/replay.sh <bag_dir> [--rviz] [--rate 2.0]
+#   bash scripts/fastlio/replay.sh <bag_directory> [--rviz] [--rate 2.0]
 
 set -euo pipefail
 
@@ -27,11 +27,11 @@ while [ "$#" -gt 0 ]; do
             shift
             ;;
         --rate)
-            RATE="${2:?Error: --rate requires a value}" 
+            RATE="${2:?Error: --rate requires a value}"
             shift 2
             ;;
         -h|--help)
-            sed -n '2,14p' "$0"
+            sed -n '1,14p' "$0"
             exit 0
             ;;
         *)
@@ -64,25 +64,8 @@ if [ -f "$DESKTOP_SETUP" ]; then
     source "$DESKTOP_SETUP"
 fi
 
-PLAY_PID=""
-cleanup() {
-    if [ -n "$PLAY_PID" ]; then
-        kill "$PLAY_PID" 2>/dev/null || true
-        wait "$PLAY_PID" 2>/dev/null || true
-    fi
-}
-trap cleanup EXIT
-
 echo "Replaying bag: $BAG"
 echo "Rate: $RATE"
+echo "RViz enabled: $RVIZ"
 
-ros2 bag play "$BAG" --clock --rate "$RATE" &
-PLAY_PID=$!
-
-sleep 2
-
-if [ "$RVIZ" = true ]; then
-    bash "$REPO_ROOT/scripts/fastlio/live_rviz.sh"
-else
-    bash "$REPO_ROOT/scripts/fastlio/check_tf.sh"
-fi
+ros2 launch fastlio_go2w_bringup replay.launch.py bag:="$BAG" rviz:="$RVIZ" rate:="$RATE"

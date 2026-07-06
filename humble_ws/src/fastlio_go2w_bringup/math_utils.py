@@ -14,13 +14,30 @@ def _normalize_quat(quat: Iterable[float]) -> np.ndarray:
     return q / norm
 
 
+def _extract_translation_rotation(obj):
+    if hasattr(obj, "position") and hasattr(obj, "orientation"):
+        tx = float(obj.position.x)
+        ty = float(obj.position.y)
+        tz = float(obj.position.z)
+        qx, qy, qz, qw = _normalize_quat(
+            [obj.orientation.x, obj.orientation.y, obj.orientation.z, obj.orientation.w]
+        )
+        return tx, ty, tz, qx, qy, qz, qw
+
+    if hasattr(obj, "translation") and hasattr(obj, "rotation"):
+        tx = float(obj.translation.x)
+        ty = float(obj.translation.y)
+        tz = float(obj.translation.z)
+        qx, qy, qz, qw = _normalize_quat(
+            [obj.rotation.x, obj.rotation.y, obj.rotation.z, obj.rotation.w]
+        )
+        return tx, ty, tz, qx, qy, qz, qw
+
+    raise AttributeError("Unsupported message type for pose/transform conversion")
+
+
 def pose_matrix_from_pose_msg(pose):
-    tx = float(pose.position.x)
-    ty = float(pose.position.y)
-    tz = float(pose.position.z)
-    qx, qy, qz, qw = _normalize_quat(
-        [pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w]
-    )
+    tx, ty, tz, qx, qy, qz, qw = _extract_translation_rotation(pose)
 
     xy2 = qx * qy
     xz2 = qx * qz
@@ -63,9 +80,24 @@ def pose_matrix_from_pose_msg(pose):
 
 
 def pose_msg_from_matrix(matrix: np.ndarray, pose):
-    pose.position.x = float(matrix[0, 3])
-    pose.position.y = float(matrix[1, 3])
-    pose.position.z = float(matrix[2, 3])
+    matrix = np.asarray(matrix, dtype=float)
+    if matrix.shape != (4, 4):
+        raise ValueError("Matrix must be 4x4.")
+
+    if hasattr(pose, "position") and hasattr(pose, "orientation"):
+        pose.position.x = float(matrix[0, 3])
+        pose.position.y = float(matrix[1, 3])
+        pose.position.z = float(matrix[2, 3])
+        out_orientation = pose.orientation
+
+    elif hasattr(pose, "translation") and hasattr(pose, "rotation"):
+        pose.translation.x = float(matrix[0, 3])
+        pose.translation.y = float(matrix[1, 3])
+        pose.translation.z = float(matrix[2, 3])
+        out_orientation = pose.rotation
+
+    else:
+        raise AttributeError("Unsupported message type for pose/transform conversion")
 
     r = matrix[:3, :3]
     tr = float(np.trace(r))
@@ -96,10 +128,10 @@ def pose_msg_from_matrix(matrix: np.ndarray, pose):
             qw = (r[1, 0] - r[0, 1]) / s
 
     q = _normalize_quat([qx, qy, qz, qw])
-    pose.orientation.x = float(q[0])
-    pose.orientation.y = float(q[1])
-    pose.orientation.z = float(q[2])
-    pose.orientation.w = float(q[3])
+    out_orientation.x = float(q[0])
+    out_orientation.y = float(q[1])
+    out_orientation.z = float(q[2])
+    out_orientation.w = float(q[3])
     return pose
 
 

@@ -96,6 +96,19 @@ source install/setup.bash
 Start live FAST-LIO:
 
 ```bash
+# Build with catmux in the provided robot image (Dockerfile installs it), then:
+catmux_create_session /external/catmux/fastlio.yaml
+```
+
+If you run a custom robot image, install Catmux first:
+
+```bash
+python3 -m pip install --user catmux
+```
+
+Then start:
+
+```bash
 catmux_create_session /external/catmux/fastlio.yaml
 ```
 
@@ -122,7 +135,7 @@ bash scripts/fastlio/live_rviz.sh --iface <desktop_interface>
 For replaying a bag:
 
 ```bash
-bash scripts/fastlio/replay.sh <bag_directory> [-- --rate 2.0]
+bash scripts/fastlio/replay.sh <bag_directory> [--rate 2.0]
 ```
 
 ## Attribution

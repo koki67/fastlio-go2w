@@ -47,7 +47,7 @@ if [ -f "$DESKTOP_SETUP" ]; then
 fi
 
 if [ "$RVIZ" = true ]; then
-    ros2 launch fastlio_go2w_bringup check_tf.launch.py rviz:=true
+    ros2 launch fastlio_go2w_bringup check_tf.launch.py use_rviz:=true
 else
-    ros2 launch fastlio_go2w_bringup check_tf.launch.py rviz:=false
+    ros2 launch fastlio_go2w_bringup check_tf.launch.py use_rviz:=false
 fi

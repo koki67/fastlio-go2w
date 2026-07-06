@@ -16,12 +16,15 @@ if [ ! -f "$XAUTH" ]; then
     chmod a+r "$XAUTH"
 fi
 
+RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
+
 docker run -it --rm \
   --privileged \
   --runtime=nvidia \
   --net=host \
   --env="DISPLAY=$DISPLAY" \
   --env="QT_X11_NO_MITSHM=1" \
+  --env="RMW_IMPLEMENTATION=$RMW_IMPLEMENTATION" \
   --env="XAUTHORITY=$XAUTH" \
   --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
   --volume="$XAUTH:$XAUTH" \

@@ -61,5 +61,6 @@ RUN git clone --depth 1 --branch v1.3.1 https://github.com/Livox-SDK/Livox-SDK2.
     cd .. && \
     rm -rf Livox-SDK2 && \
     ldconfig
+RUN python3 -m pip install --no-cache-dir catmux
 
 RUN rm -rf /var/lib/apt/lists/*
