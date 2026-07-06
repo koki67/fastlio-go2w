@@ -54,7 +54,7 @@ class OdomAdapter(Node):
 
         self._base_to_imu: Optional[np.ndarray] = None
         self._published_camera_init_static = False
-        self._last_stamp = Time(seconds=0, nanoseconds=0)
+        self._last_stamp: Optional[Time] = None
 
         self._publisher = self.create_publisher(Odometry, self._output_topic, 10)
         self.create_subscription(Odometry, self._input_topic, self._odom_cb, 10)
@@ -108,7 +108,7 @@ class OdomAdapter(Node):
                 return
 
         msg_time = Time.from_msg(msg.header.stamp)
-        if msg_time == self._last_stamp:
+        if self._last_stamp is not None and msg_time == self._last_stamp:
             self.get_logger().warn(
                 "Skipping duplicate /Odometry stamp.",
                 throttle_duration_sec=1.0,
