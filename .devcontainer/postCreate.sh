@@ -21,7 +21,9 @@ bash "$REPO_ROOT/.devcontainer/configure_git_safe_directory.sh"
 
 bash "$REPO_ROOT/scripts/setup_ws.sh"
 
+set +u
 source "$ROS_SETUP"
+set -u
 
 mkdir -p "$DESKTOP_WS_ROOT"
 rm -rf "$DESKTOP_WS_ROOT/build" "$DESKTOP_WS_ROOT/install" "$DESKTOP_WS_ROOT/log"

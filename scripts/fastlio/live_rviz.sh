@@ -18,8 +18,10 @@ source_setup_safely() {
     local setup_script="$1"
     local rc=0
 
+    set +u
     # shellcheck disable=SC1090
     source "$setup_script" || rc=$?
+    set -u
     return "$rc"
 }
 

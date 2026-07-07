@@ -56,12 +56,16 @@ if [ ! -f "$BAG/metadata.yaml" ]; then
 fi
 
 if [ -z "${ROS_DISTRO:-}" ]; then
+    set +u
     source /opt/ros/humble/setup.bash
+    set -u
 fi
 
 DESKTOP_SETUP="$REPO_ROOT/.devcontainer/desktop_ws/install/setup.bash"
 if [ -f "$DESKTOP_SETUP" ]; then
+    set +u
     source "$DESKTOP_SETUP"
+    set -u
 fi
 
 echo "Replaying bag: $BAG"

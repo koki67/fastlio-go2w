@@ -22,12 +22,24 @@ add_safe_directory() {
     git config --global --add safe.directory "$path"
 }
 
+add_submodules_from_gitmodules() {
+    local gitmodules_file="$1"
+    local base_dir
+
+    base_dir="$(dirname "$gitmodules_file")"
+
+    git config --file "$gitmodules_file" --get-regexp '^submodule\..*\.path$' 2>/dev/null \
+        | awk '{print $2}' \
+        | while read -r sub_path; do
+            add_safe_directory "$base_dir/$sub_path"
+        done
+}
+
 add_safe_directory "$REPO_ROOT"
 
-git config --file "$REPO_ROOT/.gitmodules" --get-regexp '^submodule\..*\.path$' 2>/dev/null \
-    | awk '{print $2}' \
-    | while read -r sub_path; do
-        add_safe_directory "$REPO_ROOT/$sub_path"
+find "$REPO_ROOT" -path "$REPO_ROOT/.git" -prune -o -name .gitmodules -type f -print 2>/dev/null \
+    | while read -r gitmodules_file; do
+        add_submodules_from_gitmodules "$gitmodules_file"
     done
 
 echo "Configured git safe.directory for workspace."
