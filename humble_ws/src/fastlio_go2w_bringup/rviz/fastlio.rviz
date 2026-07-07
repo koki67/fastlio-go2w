@@ -38,6 +38,17 @@ Visualization Manager:
       Size (m): 0.02
       Position Transformer: XYZ
       Color Transformer: Intensity
+    - Class: rviz_default_plugins/PointCloud2
+      Alpha: 0.6
+      Enabled: true
+      Name: Laser_map
+      Topic: /Laser_map
+      Use Fixed Frame: true
+      Style: Points
+      Size (m): 0.02
+      Position Transformer: XYZ
+      Color Transformer: Intensity
+
     - Class: rviz_default_plugins/Path
       Alpha: 1
       Enabled: true
