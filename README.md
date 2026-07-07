@@ -14,6 +14,7 @@ The repository mirrors the proven `dlio-go2w` structure, replacing the sensing a
 ```
 fastlio-go2w/
 ├── config/
+│   ├── cyclonedds.xml
 │   └── sensor/go2w_mid360_calibration.yaml
 ├── docker/robot/
 │   ├── Dockerfile
@@ -118,6 +119,25 @@ Record raw sensor bags for replay/reconstruction:
 catmux_create_session /external/catmux/record_raw.yaml
 ```
 
+By default the robot container binds CycloneDDS to the onboard `eth0`
+interface, which is the robot/sensor DDS network. To also expose the ROS graph
+to a desktop RViz session over Wi-Fi, start the robot container with remote DDS
+enabled:
+
+```bash
+bash docker/robot/run.sh --remote-viz
+```
+
+This keeps `eth0` for the robot/internal graph and adds `wlan0` for the remote
+desktop. If the robot uses a different interface name, pass it explicitly:
+
+```bash
+bash docker/robot/run.sh --remote-viz --remote-viz-iface wlan1
+```
+
+Use `--robot-iface <iface>` if the onboard robot DDS interface is not `eth0`.
+`ROS_DOMAIN_ID` is forwarded into the container and defaults to `0`.
+
 ## Desktop workflow
 
 Use the devcontainer for visualization and bag checks. For a full visual TF check:
@@ -131,6 +151,9 @@ For live RViz while streaming from robot:
 ```bash
 bash scripts/fastlio/live_rviz.sh --iface <desktop_interface>
 ```
+
+Use the desktop interface connected to the robot Wi-Fi network and the same
+`ROS_DOMAIN_ID` as the robot container.
 
 For replaying a bag:
 

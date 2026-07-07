@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  CycloneDDS profile for the GO2-W FAST-LIO stack.
+
+  The default robot-side network interface is eth0. Use
+  the remote-viz option to generate a runtime profile that
+  also binds DDS to the Wi-Fi interface for desktop RViz.
+-->
+<CycloneDDS>
+    <Domain Id="any">
+        <General>
+            <Interfaces>
+                <NetworkInterface name="eth0" priority="default" multicast="default" />
+            </Interfaces>
+        </General>
+    </Domain>
+</CycloneDDS>

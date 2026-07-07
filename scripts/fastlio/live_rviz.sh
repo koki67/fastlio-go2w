@@ -82,6 +82,7 @@ if [ ! -d "/sys/class/net/$iface" ]; then
 fi
 
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
+export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
 export CYCLONEDDS_URI="<CycloneDDS><Domain><General><Interfaces>
   <NetworkInterface name=\"$iface\" priority=\"2\" multicast=\"true\" />
 </Interfaces></General></Domain></CycloneDDS>"
@@ -90,4 +91,5 @@ echo "Launching RViz with:"
 echo "  rviz_cfg = $rviz_cfg"
 echo "  iface   = $iface"
 echo "  RMW     = $RMW_IMPLEMENTATION"
+echo "  domain  = $ROS_DOMAIN_ID"
 rviz2 -d "$rviz_cfg"
