@@ -63,4 +63,9 @@ RUN git clone --depth 1 --branch v1.3.1 https://github.com/Livox-SDK/Livox-SDK2.
     ldconfig
 RUN python3 -m pip install --no-cache-dir catmux
 
+COPY config/cyclonedds.xml /etc/cyclonedds.xml
+ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ENV CYCLONEDDS_URI=file:///etc/cyclonedds.xml
+ENV ROS_DOMAIN_ID=0
+
 RUN rm -rf /var/lib/apt/lists/*
