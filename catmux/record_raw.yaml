@@ -1,0 +1,13 @@
+common:
+  default_window: record_raw
+
+parameters:
+  source: /external/humble_ws/install/setup.bash
+
+windows:
+  - name: raw_bag
+    commands:
+      - source ${source}
+      - ros2 launch fastlio_go2w_bringup sensors.launch.py &
+      - sleep 3
+      - ros2 bag record -o /external/bags/raw_$(date +%Y%m%d_%H%M%S) /livox/lidar /livox/imu

@@ -1,0 +1,82 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Selection
+    Name: Selection
+  - Class: rviz_common/Tool Properties
+    Name: Tool Properties
+  - Class: rviz_common/Views
+    Name: Views
+  - Class: rviz_common/Time
+    Name: Time
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Name: TF
+      Frame Timeout: 60
+      Frames:
+        All Enabled: true
+      Marker Scale: 1
+      Show Axes: true
+      Show Names: true
+      Update Interval: 0
+    - Class: rviz_default_plugins/RobotModel
+      Alpha: 1
+      Enabled: true
+      Name: RobotModel
+      Robot Description: robot_description
+      Update Interval: 0
+    - Class: rviz_default_plugins/PointCloud2
+      Alpha: 1
+      Enabled: true
+      Name: cloud_registered
+      Topic: /cloud_registered
+      Use Fixed Frame: true
+      Style: Points
+      Size (m): 0.02
+      Position Transformer: XYZ
+      Color Transformer: Intensity
+    - Class: rviz_default_plugins/Path
+      Alpha: 1
+      Enabled: true
+      Name: Path
+      Topic: /path
+      Color: 25; 255; 240
+      Line Width: 0.03
+      Length: 10000
+    - Class: rviz_default_plugins/Odometry
+      Alpha: 1
+      Enabled: true
+      Name: Odometry
+      Topic: /odom
+      Keep: 1
+      Shape:
+        Axes Length: 0.4
+        Axes Radius: 0.05
+  Enabled: true
+  Global Options:
+    Background Color: 0; 0; 0
+    Fixed Frame: odom
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 20
+      Focal Point:
+        X: 0.0
+        Y: 0.0
+        Z: 0.0
+      Name: Current View
+      Pitch: 1.0
+      Target Frame: base_link
+      Yaw: 1.0
