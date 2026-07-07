@@ -22,6 +22,7 @@
   <depend>livox_ros_driver2</depend>
   <depend>go2w_description</depend>
   <exec_depend>joint_state_publisher</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>ros2bag</exec_depend>
 

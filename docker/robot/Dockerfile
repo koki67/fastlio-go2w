@@ -42,7 +42,9 @@ RUN apt-get update -q && \
       libpcap-dev \
       ros-humble-pcl-conversions \
       ros-humble-pcl-ros \
+      ros-humble-joint-state-publisher \
       ros-humble-rmw-cyclonedds-cpp \
+      ros-humble-robot-state-publisher \
       ros-humble-rosidl-default-generators \
       ros-humble-tf2-geometry-msgs \
       ros-humble-tf2-ros \
