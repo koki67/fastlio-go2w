@@ -2,9 +2,10 @@
 # Launch RViz2 for FAST-LIO on desktop.
 #
 # Usage:
-#   bash scripts/fastlio/live_rviz.sh --iface <desktop_iface> --config <rviz_config>
+#   bash scripts/fastlio/live_rviz.sh [--iface <desktop_iface>] [--config <rviz_config>]
 #
 # Example:
+#   bash scripts/fastlio/live_rviz.sh
 #   bash scripts/fastlio/live_rviz.sh --iface enp97s0
 
 set -euo pipefail
@@ -12,7 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 RVIZ_CFG_DEFAULT="$REPO_ROOT/humble_ws/src/fastlio_go2w_bringup/rviz/fastlio.rviz"
-IFACE_DEFAULT="${CYCLONEDDS_IFACE:-wlan0}"
+IFACE_DEFAULT="${CYCLONEDDS_IFACE:-enp97s0}"
 
 source_setup_safely() {
     local setup_script="$1"
@@ -85,9 +86,7 @@ fi
 
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
-export CYCLONEDDS_URI="<CycloneDDS><Domain><General><Interfaces>
-  <NetworkInterface name=\"$iface\" priority=\"2\" multicast=\"true\" />
-</Interfaces></General></Domain></CycloneDDS>"
+export CYCLONEDDS_URI="<CycloneDDS><Domain><General><Interfaces><NetworkInterface name=\"$iface\" priority=\"2\" multicast=\"true\" /></Interfaces></General></Domain></CycloneDDS>"
 
 echo "Launching RViz with:"
 echo "  rviz_cfg = $rviz_cfg"

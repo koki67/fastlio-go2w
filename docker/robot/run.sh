@@ -124,6 +124,19 @@ else
     CMD=(bash)
 fi
 
+quote_cmd() {
+    local parts=()
+    local arg
+    for arg in "$@"; do
+        parts+=("$(printf '%q' "$arg")")
+    done
+    printf '%s' "${parts[*]}"
+}
+
+ROS_BOOTSTRAP='source /opt/ros/humble/setup.bash; if [ -f /external/humble_ws/install/setup.bash ]; then source /external/humble_ws/install/setup.bash; fi'
+QUOTED_CMD="$(quote_cmd "${CMD[@]}")"
+LAUNCH_CMD="${ROS_BOOTSTRAP}; exec ${QUOTED_CMD}"
+
 docker run -it --rm \
   --privileged \
   --runtime=nvidia \
@@ -138,4 +151,4 @@ docker run -it --rm \
   --volume="$XAUTH:$XAUTH" \
   --volume="$REPO_ROOT:/external:rw" \
   "$IMAGE" \
-  "${CMD[@]}"
+  bash -lc "$LAUNCH_CMD"

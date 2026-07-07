@@ -2,7 +2,7 @@
 # Launch check_tf visualization/check workflow.
 #
 # Usage:
-#   bash scripts/fastlio/check_tf.sh [--rviz false]
+#   bash scripts/fastlio/check_tf.sh [--rviz false|true]
 
 set -euo pipefail
 
@@ -22,7 +22,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         *)
             echo "Error: unknown argument: $1" >&2
-            echo "Usage: bash scripts/fastlio/check_tf.sh [--rviz false]" >&2
+            echo "Usage: bash scripts/fastlio/check_tf.sh [--rviz false|true]" >&2
             exit 1
             ;;
     esac
@@ -50,8 +50,4 @@ if [ -f "$DESKTOP_SETUP" ]; then
     set -u
 fi
 
-if [ "$RVIZ" = true ]; then
-    ros2 launch fastlio_go2w_bringup check_tf.launch.py use_rviz:=true
-else
-    ros2 launch fastlio_go2w_bringup check_tf.launch.py use_rviz:=false
-fi
+ros2 launch fastlio_go2w_bringup check_tf.launch.py use_rviz:="$RVIZ"

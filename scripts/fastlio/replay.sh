@@ -2,13 +2,13 @@
 # Replay a raw FAST-LIO bag and optionally visualize output.
 #
 # Usage:
-#   bash scripts/fastlio/replay.sh <bag_directory> [--rviz] [--rate 2.0]
+#   bash scripts/fastlio/replay.sh <bag_directory> [--rviz] [--no-rviz] [--rate <rate>]
 
 set -euo pipefail
 
 if [ "${1:-}" = "" ]; then
     echo "Error: bag directory required." >&2
-    echo "Usage: $0 <bag_directory> [--rviz] [--rate <rate>]" >&2
+    echo "Usage: $0 <bag_directory> [--no-rviz] [--rate <rate>]" >&2
     exit 1
 fi
 
@@ -17,13 +17,17 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BAG="${1:?}"
 shift || true
 
-RVIZ=false
+RVIZ=true
 RATE=1.0
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --rviz)
             RVIZ=true
+            shift
+            ;;
+        --no-rviz)
+            RVIZ=false
             shift
             ;;
         --rate)

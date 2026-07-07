@@ -85,14 +85,10 @@ docker build -f docker/robot/Dockerfile -t fastlio-go2w:latest .
 bash docker/robot/run.sh
 ```
 
-Inside the container (source ROS 2 first):
+By default, `bash docker/robot/run.sh` now sources these inside the container shell before running your command:
 
-```bash
-cd /external/humble_ws
-source /opt/ros/humble/setup.bash
-colcon build --symlink-install --cmake-args -DROS_EDITION=ROS2 -DDISTRO_ROS=humble
-source install/setup.bash
-```
+- `/opt/ros/humble/setup.bash`
+- `/external/humble_ws/install/setup.bash` (if present)
 
 Start live FAST-LIO:
 
@@ -143,23 +139,28 @@ Use `--robot-iface <iface>` if the onboard robot DDS interface is not `eth0`.
 Use the devcontainer for visualization and bag checks. For a full visual TF check:
 
 ```bash
-bash scripts/fastlio/check_tf.sh --rviz false
+bash scripts/fastlio/check_tf.sh
 ```
 
 For live RViz while streaming from robot:
 
 ```bash
-bash scripts/fastlio/live_rviz.sh --iface <desktop_interface>
+bash scripts/fastlio/live_rviz.sh
 ```
+
+`live_rviz.sh` defaults to the interface `enp97s0`. If your desktop uses a different
+interface, specify it via `--iface`.
 
 Use the desktop interface connected to the robot Wi-Fi network and the same
 `ROS_DOMAIN_ID` as the robot container.
 
-For replaying a bag:
+For replaying a saved bag:
 
 ```bash
-bash scripts/fastlio/replay.sh <bag_directory> [--rate 2.0]
+bash scripts/fastlio/replay.sh bags/raw_YYYYMMDD_HHMMSS
 ```
+
+RViz is enabled by default for replay. Add `--no-rviz` if you need headless replay.
 
 ## Attribution
 
