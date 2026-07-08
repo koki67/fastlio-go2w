@@ -2,13 +2,13 @@
 # Replay a raw FAST-LIO bag and optionally visualize output.
 #
 # Usage:
-#   bash scripts/fastlio/replay.sh <bag_directory> [--rviz] [--no-rviz] [--rate <rate>]
+#   bash scripts/fastlio/replay.sh <bag_directory> [--rviz] [--no-rviz] [--rate <rate>] [--config <yaml>]
 
 set -euo pipefail
 
 if [ "${1:-}" = "" ]; then
     echo "Error: bag directory required." >&2
-    echo "Usage: $0 <bag_directory> [--no-rviz] [--rate <rate>]" >&2
+    echo "Usage: $0 <bag_directory> [--no-rviz] [--rate <rate>] [--config <yaml>]" >&2
     exit 1
 fi
 
@@ -19,6 +19,7 @@ shift || true
 
 RVIZ=true
 RATE=1.0
+CONFIG=""
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -32,6 +33,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --rate)
             RATE="${2:?Error: --rate requires a value}"
+            shift 2
+            ;;
+        --config)
+            CONFIG="${2:?Error: --config requires a value}"
             shift 2
             ;;
         -h|--help)
@@ -59,6 +64,20 @@ if [ ! -f "$BAG/metadata.yaml" ]; then
     exit 1
 fi
 
+if [ -n "$CONFIG" ]; then
+    if [ -f "$CONFIG" ]; then
+        CONFIG="$(cd "$(dirname "$CONFIG")" && pwd)/$(basename "$CONFIG")"
+    elif [ -f "$REPO_ROOT/$CONFIG" ]; then
+        CONFIG="$(cd "$(dirname "$REPO_ROOT/$CONFIG")" && pwd)/$(basename "$CONFIG")"
+    elif [ -f "$REPO_ROOT/humble_ws/src/fastlio_go2w_bringup/config/$CONFIG" ]; then
+        CONFIG="$REPO_ROOT/humble_ws/src/fastlio_go2w_bringup/config/$CONFIG"
+    else
+        echo "Error: config file not found: $CONFIG" >&2
+        echo "Looked relative to current directory, repository root, and fastlio_go2w_bringup/config." >&2
+        exit 1
+    fi
+fi
+
 if [ -z "${ROS_DISTRO:-}" ]; then
     set +u
     source /opt/ros/humble/setup.bash
@@ -75,5 +94,13 @@ fi
 echo "Replaying bag: $BAG"
 echo "Rate: $RATE"
 echo "RViz enabled: $RVIZ"
+if [ -n "$CONFIG" ]; then
+    echo "FAST-LIO config: $CONFIG"
+fi
 
-ros2 launch fastlio_go2w_bringup replay.launch.py bag:="$BAG" rviz:="$RVIZ" rate:="$RATE"
+launch_args=(bag:="$BAG" rviz:="$RVIZ" rate:="$RATE")
+if [ -n "$CONFIG" ]; then
+    launch_args+=(config:="$CONFIG")
+fi
+
+ros2 launch fastlio_go2w_bringup replay.launch.py "${launch_args[@]}"

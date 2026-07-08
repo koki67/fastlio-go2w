@@ -44,6 +44,11 @@ def generate_launch_description():
             default_value="false",
             description="Loop bag playback.",
         ),
+        DeclareLaunchArgument(
+            "config",
+            default_value=os.path.join(pkg, "config", "mid360_go2w.yaml"),
+            description="FAST-LIO parameter YAML file.",
+        ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(pkg, "launch", "bringup.launch.py")
@@ -52,6 +57,7 @@ def generate_launch_description():
                 "with_sensors": "false",
                 "use_sim_time": "true",
                 "use_rviz": LaunchConfiguration("rviz"),
+                "config": LaunchConfiguration("config"),
             }.items(),
         ),
         OpaqueFunction(function=_play_bag),
