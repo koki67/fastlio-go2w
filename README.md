@@ -9,6 +9,15 @@ The repository mirrors the proven `dlio-go2w` structure, replacing the sensing a
 - `fastlio_go2w_bringup` (new ROS 2 launch/config/rvt/adapter package)
 - `go2w_description` (vendored URDF, with mounted Mid-360 frames)
 
+## Table of contents
+
+- [Repository layout](#repository-layout)
+- [Submodules](#submodules)
+- [Setup](#setup)
+- [Robot-side workflow](#robot-side-workflow)
+- [Desktop workflow](#desktop-workflow)
+- [Attribution](#attribution)
+
 ## Repository layout
 
 ```
