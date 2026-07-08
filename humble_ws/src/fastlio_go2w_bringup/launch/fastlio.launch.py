@@ -31,6 +31,11 @@ def generate_launch_description():
         default_value="false",
         description="Enable FAST-LIO time-sync option.",
     )
+    config_arg = DeclareLaunchArgument(
+        "config",
+        default_value=fastlio_config,
+        description="FAST-LIO parameter YAML file.",
+    )
 
     fastlio_node = Node(
         package="fast_lio",
@@ -38,7 +43,7 @@ def generate_launch_description():
         name="fastlio_mapping",
         output="screen",
         parameters=[
-            fastlio_config,
+            LaunchConfiguration("config"),
             {
                 "use_sim_time": LaunchConfiguration("use_sim_time"),
                 "common.time_sync_en": LaunchConfiguration("time_sync_en"),
@@ -77,6 +82,7 @@ def generate_launch_description():
         rviz_arg,
         use_sim_time_arg,
         time_sync_arg,
+        config_arg,
         fastlio_node,
         odom_adapter_node,
         rviz_node,

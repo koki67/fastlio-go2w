@@ -34,6 +34,11 @@ def generate_launch_description():
         default_value="false",
         description="Enable FAST-LIO time-sync mode.",
     )
+    config_arg = DeclareLaunchArgument(
+        "config",
+        default_value=os.path.join(pkg, "config", "mid360_go2w.yaml"),
+        description="FAST-LIO parameter YAML file.",
+    )
 
     robot_description = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -53,6 +58,7 @@ def generate_launch_description():
             "use_rviz": LaunchConfiguration("use_rviz"),
             "use_sim_time": LaunchConfiguration("use_sim_time"),
             "time_sync_en": LaunchConfiguration("time_sync_en"),
+            "config": LaunchConfiguration("config"),
         }.items(),
     )
 
@@ -61,6 +67,7 @@ def generate_launch_description():
         use_rviz_arg,
         use_sim_time_arg,
         time_sync_arg,
+        config_arg,
         robot_description,
         sensors,
         fastlio,
