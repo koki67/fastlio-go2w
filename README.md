@@ -79,10 +79,8 @@ bash scripts/setup_ws.sh
 Build (Ubuntu 22.04 / ROS 2 Humble):
 
 ```bash
-cd humble_ws
-source /opt/ros/humble/setup.bash
-colcon build --symlink-install --cmake-args -DROS_EDITION=ROS2 -DDISTRO_ROS=humble
-source install/setup.bash
+bash scripts/build_ws.sh
+source humble_ws/install/setup.bash
 ```
 
 ## Robot-side workflow
