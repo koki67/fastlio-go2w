@@ -17,7 +17,7 @@ fi
 usage() {
     cat <<'EOF_USAGE'
 Usage:
-  bash docker/robot/run.sh [options] [command...]
+  bash docker/run.sh [options] [command...]
 
 Options:
   --remote-viz                 Also bind CycloneDDS to the Wi-Fi interface so

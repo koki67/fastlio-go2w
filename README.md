@@ -27,7 +27,7 @@ fastlio-go2w/
 ├── config/
 │   ├── cyclonedds.xml
 │   └── sensor/go2w_mid360_calibration.yaml
-├── docker/robot/
+├── docker/
 │   ├── Dockerfile
 │   └── run.sh
 ├── bags/
@@ -40,10 +40,11 @@ fastlio-go2w/
 ├── scripts/
 │   ├── setup_ws.sh
 │   ├── build_ws.sh
+│   ├── diagnostics/
+│   │   └── check_tf.sh
 │   └── fastlio/
 │       ├── replay.sh
 │       ├── live_rviz.sh
-│       └── check_tf.sh
 └── catmux/
     ├── fastlio.yaml
     └── record_raw.yaml
@@ -85,28 +86,28 @@ From the Jetson host, build or refresh the Docker image when the Dockerfile or s
 
 ```bash
 cd ~/Projects/fastlio-go2w
-docker build -f docker/robot/Dockerfile -t fastlio-go2w:latest .
+docker build -f docker/Dockerfile -t fastlio-go2w:latest .
 ```
 
 Build the mounted ROS workspace inside the container. Use `--host-user` for build commands so generated `build/`, `install/`, and `log/` files remain owned by the Jetson user:
 
 ```bash
-bash docker/robot/run.sh --host-user bash -lc 'cd /external && bash scripts/setup_ws.sh && bash scripts/build_ws.sh'
+bash docker/run.sh --host-user bash -lc 'cd /external && bash scripts/setup_ws.sh && bash scripts/build_ws.sh'
 ```
 
 After normal source-code changes, rebuild only the workspace inside the container:
 
 ```bash
-bash docker/robot/run.sh --host-user bash -lc 'cd /external && bash scripts/build_ws.sh'
+bash docker/run.sh --host-user bash -lc 'cd /external && bash scripts/build_ws.sh'
 ```
 
 Start an interactive robot container shell:
 
 ```bash
-bash docker/robot/run.sh
+bash docker/run.sh
 ```
 
-By default, `bash docker/robot/run.sh` sources these inside the container shell before running your command:
+By default, `bash docker/run.sh` sources these inside the container shell before running your command:
 
 - `/opt/ros/humble/setup.bash`
 - `/external/humble_ws/install/setup.bash` (if present)
@@ -126,13 +127,13 @@ catmux_create_session /external/catmux/record_raw.yaml
 By default the robot container binds CycloneDDS to the onboard `eth0` interface, which is the robot/sensor DDS network. To also expose the ROS graph to a desktop RViz session over Wi-Fi, start the robot container with remote DDS enabled:
 
 ```bash
-bash docker/robot/run.sh --remote-viz
+bash docker/run.sh --remote-viz
 ```
 
 This keeps `eth0` for the robot/internal graph and adds `wlan0` for the remote desktop. If the robot uses a different interface name, pass it explicitly:
 
 ```bash
-bash docker/robot/run.sh --remote-viz --remote-viz-iface wlan1
+bash docker/run.sh --remote-viz --remote-viz-iface wlan1
 ```
 
 Use `--robot-iface <iface>` if the onboard robot DDS interface is not `eth0`. `ROS_DOMAIN_ID` is forwarded into the container and defaults to `0`.
@@ -142,7 +143,7 @@ Use `--robot-iface <iface>` if the onboard robot DDS interface is not `eth0`. `R
 Use the devcontainer for visualization and bag checks. For a full visual TF check:
 
 ```bash
-bash scripts/fastlio/check_tf.sh
+bash scripts/diagnostics/check_tf.sh
 ```
 
 For live RViz while streaming from robot:

@@ -2,7 +2,7 @@
 # Launch check_tf visualization/check workflow.
 #
 # Usage:
-#   bash scripts/fastlio/check_tf.sh [--rviz false|true]
+#   bash scripts/diagnostics/check_tf.sh [--rviz false|true]
 
 set -euo pipefail
 
@@ -22,7 +22,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         *)
             echo "Error: unknown argument: $1" >&2
-            echo "Usage: bash scripts/fastlio/check_tf.sh [--rviz false|true]" >&2
+            echo "Usage: bash scripts/diagnostics/check_tf.sh [--rviz false|true]" >&2
             exit 1
             ;;
     esac
