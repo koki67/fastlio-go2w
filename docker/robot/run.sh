@@ -133,18 +133,7 @@ else
     CMD=(bash)
 fi
 
-quote_cmd() {
-    local parts=()
-    local arg
-    for arg in "$@"; do
-        parts+=("$(printf '%q' "$arg")")
-    done
-    printf '%s' "${parts[*]}"
-}
-
-ROS_BOOTSTRAP='source /opt/ros/humble/setup.bash; if [ -f /external/humble_ws/install/setup.bash ]; then source /external/humble_ws/install/setup.bash; fi'
-QUOTED_CMD="$(quote_cmd "${CMD[@]}")"
-LAUNCH_CMD="${ROS_BOOTSTRAP}; exec ${QUOTED_CMD}"
+CONTAINER_BOOTSTRAP='source /opt/ros/humble/setup.bash; if [ -f /external/humble_ws/install/setup.bash ]; then source /external/humble_ws/install/setup.bash; fi; exec "$@"'
 
 USER_ARGS=()
 if [ "$HOST_USER" = "true" ]; then
@@ -166,4 +155,6 @@ docker run -it --rm \
   --volume="$REPO_ROOT:/external:rw" \
   "${USER_ARGS[@]}" \
   "$IMAGE" \
-  bash -lc "$LAUNCH_CMD"
+  bash -lc "$CONTAINER_BOOTSTRAP" \
+  bash \
+  "${CMD[@]}"

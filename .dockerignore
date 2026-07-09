@@ -1,0 +1,6 @@
+**
+!config
+!config/cyclonedds.xml
+!docker
+!docker/robot
+!docker/robot/Dockerfile
