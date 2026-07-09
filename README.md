@@ -162,6 +162,18 @@ For replaying a saved bag:
 bash scripts/fastlio/replay.sh bags/raw_YYYYMMDD_HHMMSS
 ```
 
+To replay with a specific FAST-LIO parameter YAML, pass `--config`.
+Without `--config`, replay uses `mid360_go2w.yaml`.
+
+```bash
+bash scripts/fastlio/replay.sh bags/raw_YYYYMMDD_HHMMSS --config mid360_go2w_accuracy.yaml
+bash scripts/fastlio/replay.sh bags/raw_YYYYMMDD_HHMMSS --config humble_ws/src/fastlio_go2w_bringup/config/mid360_go2w_viz_dense.yaml
+```
+
+`--config` accepts an absolute path, a path relative to the current directory
+or repository root, or a file name under
+`humble_ws/src/fastlio_go2w_bringup/config/`.
+
 RViz is enabled by default for replay. Add `--no-rviz` if you need headless replay.
 
 ## Attribution
