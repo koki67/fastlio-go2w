@@ -30,12 +30,15 @@ WORK_INSTALL_DIR="$WORKSPACE_ROOT/install"
 
 for required_dir in "$WORK_BUILD_DIR" "$WORK_INSTALL_DIR"; do
     mkdir -p "$required_dir"
-
 done
 
 check_workspace_dir_permissions() {
     local dir="$1"
     local bad_paths=()
+
+    if [ ! -w "$dir" ] || [ "$(stat -c '%u' "$dir")" -eq 0 ]; then
+        bad_paths+=("$dir")
+    fi
 
     for entry in "$dir"/*; do
         [ -e "$entry" ] || continue
@@ -54,9 +57,12 @@ check_workspace_dir_permissions() {
         for bad_path in "${bad_paths[@]}"; do
             echo "  - $bad_path (owner: $(stat -c '%U:%G' "$bad_path"), perms: $(stat -c '%A' "$bad_path"))" >&2
         done
-        echo "Hint: clean this workspace on-device with user permissions, then rerun." >&2
-        echo "Example: rm -rf $WORKSPACE_ROOT/build $WORKSPACE_ROOT/install" >&2
-        echo "Then rerun setup_ws.sh and build_ws.sh." >&2
+        echo "Hint: these are stale build artifacts, usually from running colcon with sudo/root." >&2
+        echo "Fix on the robot once with:" >&2
+        echo "  sudo chown -R \"$(id -un):$(id -gn)\" $WORKSPACE_ROOT/build $WORKSPACE_ROOT/install" >&2
+        echo "Then rerun:" >&2
+        echo "  bash scripts/setup_ws.sh" >&2
+        echo "  bash scripts/build_ws.sh" >&2
         exit 1
     fi
 }
