@@ -8,13 +8,14 @@ IMAGE="${FASTLIO_GO2W_IMAGE:-fastlio-go2w:latest}"
 ROBOT_IFACE="${FASTLIO_GO2W_ROBOT_IFACE:-eth0}"
 REMOTE_VIZ_IFACE="${FASTLIO_GO2W_REMOTE_IFACE:-wlan0}"
 REMOTE_VIZ="${FASTLIO_GO2W_REMOTE_VIZ:-false}"
+HOST_USER="${FASTLIO_GO2W_HOST_USER:-false}"
 ROBOT_IFACE_OVERRIDDEN=false
 if [ -n "${FASTLIO_GO2W_ROBOT_IFACE:-}" ]; then
     ROBOT_IFACE_OVERRIDDEN=true
 fi
 
 usage() {
-    cat <<'EOF'
+    cat <<'EOF_USAGE'
 Usage:
   bash docker/robot/run.sh [options] [command...]
 
@@ -25,6 +26,9 @@ Options:
                                (default: wlan0 or FASTLIO_GO2W_REMOTE_IFACE).
   --robot-iface IFACE          Robot/internal DDS interface (default: eth0 or
                                FASTLIO_GO2W_ROBOT_IFACE).
+  --host-user                  Run the container command as the invoking host
+                               UID/GID. Use this for workspace builds so
+                               build/install artifacts stay user-owned.
   -h, --help                   Show this help.
 
 Environment:
@@ -32,10 +36,11 @@ Environment:
   FASTLIO_GO2W_REMOTE_VIZ      Set true to enable remote visualization DDS.
   FASTLIO_GO2W_REMOTE_IFACE    Remote visualization interface, default wlan0.
   FASTLIO_GO2W_ROBOT_IFACE     Robot/internal DDS interface, default eth0.
+  FASTLIO_GO2W_HOST_USER       Set true to enable --host-user behavior.
   ROS_DOMAIN_ID                Forwarded into the container, default 0.
   CYCLONEDDS_URI               If set, used verbatim and generated DDS profiles
                                are skipped.
-EOF
+EOF_USAGE
 }
 
 while [ "$#" -gt 0 ]; do
@@ -60,6 +65,10 @@ while [ "$#" -gt 0 ]; do
             ROBOT_IFACE="$2"
             ROBOT_IFACE_OVERRIDDEN=true
             shift 2
+            ;;
+        --host-user)
+            HOST_USER=true
+            shift
             ;;
         -h|--help)
             usage
@@ -137,6 +146,11 @@ ROS_BOOTSTRAP='source /opt/ros/humble/setup.bash; if [ -f /external/humble_ws/in
 QUOTED_CMD="$(quote_cmd "${CMD[@]}")"
 LAUNCH_CMD="${ROS_BOOTSTRAP}; exec ${QUOTED_CMD}"
 
+USER_ARGS=()
+if [ "$HOST_USER" = "true" ]; then
+    USER_ARGS=(--user "$(id -u):$(id -g)" --env="HOME=/tmp")
+fi
+
 docker run -it --rm \
   --privileged \
   --runtime=nvidia \
@@ -150,5 +164,6 @@ docker run -it --rm \
   --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
   --volume="$XAUTH:$XAUTH" \
   --volume="$REPO_ROOT:/external:rw" \
+  "${USER_ARGS[@]}" \
   "$IMAGE" \
   bash -lc "$LAUNCH_CMD"
