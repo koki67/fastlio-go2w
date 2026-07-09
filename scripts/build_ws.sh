@@ -79,5 +79,5 @@ cd "$WORKSPACE_ROOT"
 colcon build --symlink-install \
     --cmake-args \
     -DROS_EDITION=ROS2 \
-    -DDISTRO_ROS="" \
+    -DDISTRO_ROS="$ROS_DISTRO_NAME" \
     -DPython3_EXECUTABLE="$PYTHON_BIN"
