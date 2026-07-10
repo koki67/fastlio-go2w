@@ -6,12 +6,15 @@
   },
   "containerEnv": {
     "DISPLAY": "${localEnv:DISPLAY}",
+    "XAUTHORITY": "/tmp/.Xauthority",
     "QT_X11_NO_MITSHM": "1"
   },
   "runArgs": ["--net=host"],
   "mounts": [
-    "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind,consistency=cached"
+    "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.Xauthority,target=/tmp/.Xauthority,type=bind,consistency=cached"
   ],
+  "initializeCommand": "xhost +si:localuser:root >/dev/null 2>/dev/null || true; xhost +si:localuser:$(id -un) >/dev/null 2>/dev/null || true",
   "postCreateCommand": "bash .devcontainer/postCreate.sh",
   "postStartCommand": "bash .devcontainer/configure_git_safe_directory.sh"
 }
