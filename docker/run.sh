@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 IMAGE="${FASTLIO_GO2W_IMAGE:-fastlio-go2w:latest}"
 ROBOT_IFACE="${FASTLIO_GO2W_ROBOT_IFACE:-eth0}"
