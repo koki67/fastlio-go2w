@@ -13,7 +13,8 @@
   "mounts": [
     "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind,consistency=cached",
     "source=${localEnv:HOME}/.Xauthority,target=/tmp/.Xauthority,type=bind,consistency=cached",
-    "source=/mnt/data1/experimental_data/go2w-experiment-recorder/bags,target=/mnt/go2w-experiment-recorder/bags,type=bind,readonly"
+    "source=/mnt/data1/experimental_data/go2w-experiment-recorder/bags,target=/mnt/go2w-experiment-recorder/bags,type=bind,readonly",
+    "source=/mnt/data1/experimental_data/fastlio-go2w/bags,target=/mnt/fastlio-go2w/bags,type=bind,readonly"
   ],
   "initializeCommand": "xhost +si:localuser:root >/dev/null 2>/dev/null || true; xhost +si:localuser:$(id -un) >/dev/null 2>/dev/null || true",
   "postCreateCommand": "bash .devcontainer/postCreate.sh",

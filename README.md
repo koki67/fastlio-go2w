@@ -162,13 +162,18 @@ For replaying a saved bag:
 bash scripts/fastlio/replay.sh bags/raw_YYYYMMDD_HHMMSS
 ```
 
-The devcontainer mounts the experiment recorder's bag directory at
-`/mnt/go2w-experiment-recorder/bags` as read-only. This lets you replay a bag
-stored under `/mnt/data1/experimental_data/go2w-experiment-recorder` without
-copying it into this repository:
+The devcontainer mounts the following external bag directories as read-only:
+
+- `/mnt/data1/experimental_data/go2w-experiment-recorder/bags` at
+  `/mnt/go2w-experiment-recorder/bags`
+- `/mnt/data1/experimental_data/fastlio-go2w/bags` at
+  `/mnt/fastlio-go2w/bags`
+
+This lets you replay a bag stored outside this repository without copying it:
 
 ```bash
 bash scripts/fastlio/replay.sh /mnt/go2w-experiment-recorder/bags/raw_YYYYMMDD_HHMMSS
+bash scripts/fastlio/replay.sh /mnt/fastlio-go2w/bags/raw_YYYYMMDD_HHMMSS
 ```
 
 After pulling this configuration change, use **Dev Containers: Rebuild and
