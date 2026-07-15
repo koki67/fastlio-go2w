@@ -164,8 +164,8 @@ bash scripts/fastlio/replay.sh bags/raw_YYYYMMDD_HHMMSS
 
 The devcontainer mounts the experiment recorder's bag directory at
 `/mnt/go2w-experiment-recorder/bags` as read-only. This lets you replay a bag
-captured by `~/ws/go2w-experiment-recorder` without copying it into this
-repository:
+stored under `/mnt/data1/experimental_data/go2w-experiment-recorder` without
+copying it into this repository:
 
 ```bash
 bash scripts/fastlio/replay.sh /mnt/go2w-experiment-recorder/bags/raw_YYYYMMDD_HHMMSS
