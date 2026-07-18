@@ -13,8 +13,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from analyze_multilidar_run import (  # noqa: E402
+    FrameIdTracker,
     PoseSample,
+    _pose_sample,
+    _sha256_file,
+    _stable_preview,
     _validate_comparison_runs,
+    _write_trajectory_artifacts,
+    build_parser,
     DiagnosticCollector,
     VoxelAccumulator,
     pointcloud2_xyz,
@@ -180,8 +186,15 @@ def _comparison_run(label, rate=1.0):
                 "frame_count": 3,
                 "finite_point_count": 10,
                 "voxel_size_m": 0.2,
+                "voxel_chunk_points": 500_000,
                 "pcd_data_format": "binary",
-                "local_planes": {"radius_m": 0.6, "minimum_points": 20},
+                "local_planes": {
+                    "radius_m": 0.6,
+                    "minimum_points": 20,
+                    "maximum_sample_count": 5_000,
+                    "random_seed": 7,
+                },
+                "preview": {"maximum_point_count": 500_000},
             },
         },
     }
@@ -192,10 +205,98 @@ def test_comparison_validation_requires_matching_replay_and_analysis_settings():
     fused = _comparison_run("fused")
 
     validated = _validate_comparison_runs([baseline, fused])
+    assert validated["summary.map.voxel_chunk_points"] == 500_000
+    assert (
+        validated["summary.map.local_planes.maximum_sample_count"] == 5_000
+    )
+    assert validated["summary.map.local_planes.random_seed"] == 7
+    assert (
+        validated["summary.map.preview.maximum_point_count"] == 500_000
+    )
     assert validated["manifest.playback.rate"] == 1.0
 
     fused["manifest"]["playback"]["rate"] = 2.0
     with pytest.raises(ValueError, match="manifest.playback.rate"):
+        _validate_comparison_runs([baseline, fused])
+
+
+@pytest.mark.parametrize(
+    ("path", "different_value", "canonical_path"),
+    [
+        (("map", "voxel_chunk_points"), 1_000, "summary.map.voxel_chunk_points"),
+        (
+            ("map", "local_planes", "maximum_sample_count"),
+            100,
+            "summary.map.local_planes.maximum_sample_count",
+        ),
+        (("map", "local_planes", "random_seed"), 99, "summary.map.local_planes.random_seed"),
+        (
+            ("map", "preview", "maximum_point_count"),
+            1_000,
+            "summary.map.preview.maximum_point_count",
+        ),
+    ],
+)
+def test_comparison_rejects_different_deterministic_analysis_settings(
+    path, different_value, canonical_path
+):
+    baseline = _comparison_run("baseline")
+    fused = _comparison_run("fused")
+
+    current = fused["summary"]
+    for key in path[:-1]:
+        current = current[key]
+    current[path[-1]] = different_value
+
+    with pytest.raises(
+        ValueError,
+        match=canonical_path.replace(".", r"\."),
+    ):
+        _validate_comparison_runs([baseline, fused])
+
+
+def test_comparison_accepts_analysis_parameter_fallback_fields():
+    baseline = _comparison_run("baseline")
+    fused = _comparison_run("fused")
+
+    fused_summary = fused["summary"]
+    fused_summary["analysis_parameters"] = {
+        "voxel_chunk_points": 500_000,
+        "plane_maximum_samples": 5_000,
+        "plane_random_seed": 7,
+        "preview_max_points": 500_000,
+    }
+    map_summary = fused_summary["map"]
+    map_summary.pop("voxel_chunk_points")
+    map_summary["local_planes"].pop("maximum_sample_count")
+    map_summary["local_planes"].pop("random_seed")
+    map_summary["preview"].pop("maximum_point_count")
+
+    validated = _validate_comparison_runs([baseline, fused])
+    assert validated["summary.map.voxel_chunk_points"] == 500_000
+
+
+def test_comparison_reports_missing_new_invariant_field():
+    legacy = _comparison_run("legacy")
+    fused = _comparison_run("fused")
+    legacy["summary"]["map"].pop("voxel_chunk_points")
+
+    with pytest.raises(
+        ValueError,
+        match=r"missing comparison invariant 'summary\.map\.voxel_chunk_points'",
+    ):
+        _validate_comparison_runs([legacy, fused])
+
+
+def test_comparison_reports_conflicting_fallback_fields():
+    baseline = _comparison_run("baseline")
+    fused = _comparison_run("fused")
+    fused["summary"]["analysis_parameters"] = {"voxel_chunk_points": 1_000}
+
+    with pytest.raises(
+        ValueError,
+        match=r"conflicting fields.*summary\.map\.voxel_chunk_points",
+    ):
         _validate_comparison_runs([baseline, fused])
 
 
@@ -248,3 +349,147 @@ def test_resource_metrics_derives_cpu_and_peak_rss(tmp_path):
     assert result["available"]
     assert np.isclose(result["processes"]["fastlio"]["average_cpu_cores"], 1.5)
     assert result["processes"]["fastlio"]["peak_rss_bytes"] == 120 * 1024
+
+
+def test_plane_metrics_are_chunk_and_insertion_order_independent():
+    axis = np.arange(-12, 13, dtype=np.float64) / 8.0
+    x, y = np.meshgrid(axis, axis)
+    plane = np.column_stack((x.ravel(), y.ravel(), np.zeros(x.size)))
+
+    first = VoxelAccumulator(0.25, chunk_points=37)
+    first.add(plane)
+
+    second = VoxelAccumulator(0.25, chunk_points=11)
+    for start in range(0, plane.shape[0], 17):
+        second.add(plane[::-1][start:start + 17])
+
+    settings = {
+        "radius_m": 0.55,
+        "min_points": 5,
+        "max_samples": 80,
+        "random_seed": 19,
+    }
+    first_metrics = first.local_plane_metrics(**settings)
+    second_metrics = second.local_plane_metrics(**settings)
+
+    assert first_metrics["sampled_voxel_key_sha256"] == second_metrics[
+        "sampled_voxel_key_sha256"
+    ]
+    assert first_metrics["sampled_voxel_count"] == 80
+    assert first_metrics["valid_neighborhood_count"] == second_metrics[
+        "valid_neighborhood_count"
+    ]
+    for metric in ("plane_thickness_m", "planarity"):
+        for statistic in ("count", "mean", "median", "p95", "max"):
+            left = first_metrics[metric][statistic]
+            right = second_metrics[metric][statistic]
+            if left is None or right is None:
+                assert left == right
+            else:
+                assert np.isclose(left, right, equal_nan=True)
+
+
+def test_frame_tracking_rejects_mixed_cloud_frames_and_pose_keeps_frames():
+    tracker = FrameIdTracker("/cloud_registered")
+    tracker.add("")
+    tracker.add("camera_init")
+    tracker.add("camera_init")
+    assert tracker.frame_id == "camera_init"
+    with pytest.raises(ValueError, match="mixed nonempty frame IDs"):
+        tracker.add("map")
+
+    message = SimpleNamespace(
+        header=SimpleNamespace(stamp=SimpleNamespace(sec=1, nanosec=2), frame_id="map"),
+        child_frame_id="base_link",
+        pose=SimpleNamespace(
+            pose=SimpleNamespace(
+                position=SimpleNamespace(x=1.0, y=2.0, z=3.0),
+                orientation=SimpleNamespace(x=0.0, y=0.0, z=0.0, w=1.0),
+            )
+        ),
+    )
+    sample = _pose_sample(message, 123)
+
+    assert sample.frame_id == "map"
+    assert sample.child_frame_id == "base_link"
+
+
+def test_dual_trajectory_artifacts_keep_primary_and_camera_init_csv(tmp_path):
+    odom_sample = PoseSample(
+        stamp_ns=1,
+        bag_stamp_ns=2,
+        position=(1.0, 2.0, 3.0),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+        frame_id="camera_init",
+        child_frame_id="body",
+    )
+    camera_sample = PoseSample(
+        stamp_ns=3,
+        bag_stamp_ns=4,
+        position=(4.0, 5.0, 6.0),
+        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+        frame_id="camera_init",
+        child_frame_id="body",
+    )
+
+    primary_record, artifacts = _write_trajectory_artifacts(
+        tmp_path,
+        {"/odom": [odom_sample], "/Odometry": [camera_sample]},
+        "/odom",
+    )
+
+    assert primary_record["path"] == "trajectory.csv"
+    assert set(artifacts) == {"/odom", "/Odometry"}
+    assert artifacts["/odom"]["path"] == "trajectory.csv"
+    camera_artifact = artifacts["/Odometry"]
+    assert camera_artifact["path"] == "trajectory_camera_init.csv"
+    assert camera_artifact["frame_id"] == "camera_init"
+    assert camera_artifact["child_frame_id"] == "body"
+    assert camera_artifact["sha256"] == _sha256_file(
+        tmp_path / "trajectory_camera_init.csv"
+    )
+    assert primary_record["sha256"] == _sha256_file(tmp_path / "trajectory.csv")
+
+    with (tmp_path / "trajectory_camera_init.csv").open(newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == 1
+    assert rows[0]["topic"] == "/Odometry"
+    assert rows[0]["frame_id"] == "camera_init"
+    assert rows[0]["child_frame_id"] == "body"
+    with (tmp_path / "trajectory.csv").open(newline="") as stream:
+        primary_rows = list(csv.DictReader(stream))
+    assert primary_rows[0]["topic"] == "/odom"
+
+
+def test_map_preview_is_deterministic_evenly_spaced_and_capped(tmp_path):
+    values = np.arange(23, dtype=np.float64)
+    centroids = np.column_stack((values, values * 2.0, values * -0.5))
+    counts = np.arange(1, 24, dtype=np.uint32)
+
+    first_points, first_counts = _stable_preview(centroids, counts, 7)
+    second_points, second_counts = _stable_preview(centroids, counts, 7)
+
+    assert first_points.shape == (7, 3)
+    np.testing.assert_array_equal(first_points, second_points)
+    np.testing.assert_array_equal(first_counts, second_counts)
+    np.testing.assert_array_equal(first_points[0], centroids[0])
+    np.testing.assert_array_equal(first_points[-1], centroids[-1])
+
+    first_path = tmp_path / "first.pcd"
+    second_path = tmp_path / "second.pcd"
+    write_pcd(first_path, first_points, first_counts, "binary")
+    write_pcd(second_path, second_points, second_counts, "binary")
+    assert _sha256_file(first_path) == _sha256_file(second_path)
+
+    single_points, single_counts = _stable_preview(centroids, counts, 1)
+    np.testing.assert_array_equal(single_points[0], centroids[11])
+    np.testing.assert_array_equal(single_counts, counts[[11]])
+    with pytest.raises(ValueError, match="preview_max_points"):
+        _stable_preview(centroids, counts, 0)
+
+
+def test_analyze_cli_has_deterministic_artifact_defaults():
+    args = build_parser().parse_args(["analyze", "bag", "--output-dir", "out"])
+
+    assert args.plane_random_seed == 7
+    assert args.preview_max_points == 500_000

@@ -12,7 +12,7 @@ Usage:
   scripts/offline/run_multilidar_experiment.sh BAG --profile PROFILE [options]
 
 Profiles:
-  baseline       MID-360 only, using the existing FAST-LIO point stride of 3
+  baseline       MID-360 only, using the accuracy-tuned FAST-LIO configuration
   fused-high     MID-360 stride 3 plus XT16 firing stride 3
   fused-matched  MID-360 stride 6 plus XT16 firing stride 22
 
@@ -22,7 +22,15 @@ Options:
   --rate RATE         Rosbag playback multiplier (default: 1.0)
   --domain-id ID      Isolated ROS domain ID (default: 77)
   --output DIR        Result directory (default: results/multilidar/...)
+  --config YAML       Override tuning while preserving the profile input and
+                      headless output contract
   --debug-cloud       Publish and record /livox/lidar_fused_debug
+  --no-analyze        Keep the result bag but skip automatic artifact generation
+  --map-voxel-size M  Final map voxel edge length (default: 0.20)
+  --preview-max-points N
+                      Maximum points in the RViz preview map (default: 500000)
+  --plane-random-seed N
+                      Deterministic local-plane sample seed (default: 7)
   -h, --help          Show this help
 
 The workspace must already be built. The runner plays only /livox/lidar,
@@ -44,6 +52,11 @@ RATE="1.0"
 DOMAIN_ID="77"
 OUTPUT_DIR=""
 DEBUG_CLOUD="false"
+CONFIG_OVERRIDE=""
+ANALYZE="true"
+MAP_VOXEL_SIZE="0.20"
+PREVIEW_MAX_POINTS="500000"
+PLANE_RANDOM_SEED="7"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -71,9 +84,29 @@ while [ "$#" -gt 0 ]; do
             OUTPUT_DIR="${2:?Error: --output requires a value}"
             shift 2
             ;;
+        --config)
+            CONFIG_OVERRIDE="${2:?Error: --config requires a value}"
+            shift 2
+            ;;
         --debug-cloud)
             DEBUG_CLOUD="true"
             shift
+            ;;
+        --no-analyze)
+            ANALYZE="false"
+            shift
+            ;;
+        --map-voxel-size)
+            MAP_VOXEL_SIZE="${2:?Error: --map-voxel-size requires a value}"
+            shift 2
+            ;;
+        --preview-max-points)
+            PREVIEW_MAX_POINTS="${2:?Error: --preview-max-points requires a value}"
+            shift 2
+            ;;
+        --plane-random-seed)
+            PLANE_RANDOM_SEED="${2:?Error: --plane-random-seed requires a value}"
+            shift 2
             ;;
         -h|--help)
             usage
@@ -101,6 +134,14 @@ python3 -c 'import sys; value=float(sys.argv[1]); sys.exit(not value >= 0)' "$ST
     || die "--start-offset must be a non-negative number"
 python3 -c 'import sys; value=float(sys.argv[1]); sys.exit(not value > 0)' "$RATE" \
     || die "--rate must be greater than zero"
+if [ "$ANALYZE" = "true" ]; then
+    python3 -c 'import sys; value=float(sys.argv[1]); sys.exit(not value > 0)' "$MAP_VOXEL_SIZE" \
+        || die "--map-voxel-size must be greater than zero"
+    [[ "$PREVIEW_MAX_POINTS" =~ ^[1-9][0-9]*$ ]] \
+        || die "--preview-max-points must be a positive integer"
+    [[ "$PLANE_RANDOM_SEED" =~ ^[0-9]+$ ]] \
+        || die "--plane-random-seed must be a non-negative integer"
+fi
 if [ -n "$DURATION" ]; then
     python3 -c 'import sys; value=float(sys.argv[1]); sys.exit(not value > 0)' "$DURATION" \
         || die "--duration must be greater than zero"
@@ -115,6 +156,26 @@ for topic in /livox/lidar /livox/imu /points_raw; do
         || die "required topic $topic is absent from the bag"
 done
 
+CONFIG_DIR="$REPO_ROOT/humble_ws/src/fastlio_go2w_bringup/config"
+if [ -n "$CONFIG_OVERRIDE" ]; then
+    if [ -f "$CONFIG_OVERRIDE" ]; then
+        FASTLIO_CONFIG="$(realpath "$CONFIG_OVERRIDE")"
+    elif [ -f "$REPO_ROOT/$CONFIG_OVERRIDE" ]; then
+        FASTLIO_CONFIG="$(realpath "$REPO_ROOT/$CONFIG_OVERRIDE")"
+    elif [ -f "$CONFIG_DIR/$CONFIG_OVERRIDE" ]; then
+        FASTLIO_CONFIG="$(realpath "$CONFIG_DIR/$CONFIG_OVERRIDE")"
+    else
+        die "FAST-LIO config not found: $CONFIG_OVERRIDE"
+    fi
+else
+    if [ "$PROFILE" = "baseline" ]; then
+        FASTLIO_CONFIG="$CONFIG_DIR/mid360_go2w_accuracy_offline.yaml"
+    else
+        FASTLIO_CONFIG="$CONFIG_DIR/mid360_xt16_fused_accuracy_offline.yaml"
+    fi
+fi
+[ -f "$FASTLIO_CONFIG" ] || die "profile config not found: $FASTLIO_CONFIG"
+
 if [ -z "$OUTPUT_DIR" ]; then
     BAG_NAME="$(basename "$BAG")"
     RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -125,7 +186,6 @@ fi
 if [ -d "$OUTPUT_DIR" ] && [ -n "$(find "$OUTPUT_DIR" -mindepth 1 -print -quit)" ]; then
     die "output directory is not empty: $OUTPUT_DIR"
 fi
-mkdir -p "$OUTPUT_DIR"
 
 if [ -f /opt/ros/humble/setup.bash ]; then
     set +u
@@ -135,76 +195,130 @@ elif [ "${ROS_DISTRO:-}" != "humble" ]; then
     die "ROS 2 Humble is required (run this inside the project container)"
 fi
 
-WORKSPACE_SETUP=""
-for candidate in \
-    "$REPO_ROOT/humble_ws/install/setup.bash" \
-    "$REPO_ROOT/.devcontainer/desktop_ws/install/setup.bash"; do
-    if [ -f "$candidate" ]; then
+for command in ros2 setsid python3 sha256sum cp git realpath; do
+    command -v "$command" >/dev/null || die "required command not found: $command"
+done
+python3 -c 'import yaml' >/dev/null 2>&1 \
+    || die "PyYAML is required for result validation"
+
+LAUNCH_SOURCE="$REPO_ROOT/humble_ws/src/fastlio_go2w_bringup/launch/offline_multilidar.launch.py"
+[ -f "$LAUNCH_SOURCE" ] || die "experiment launch source not found: $LAUNCH_SOURCE"
+LAUNCH_SHA256="$(sha256sum "$LAUNCH_SOURCE" | awk '{print $1}')"
+
+ANALYZER_SOURCE=""
+if [ "$ANALYZE" = "true" ]; then
+    ANALYZER_SOURCE="$SCRIPT_DIR/analyze_multilidar_run.py"
+    [ -f "$ANALYZER_SOURCE" ] || die "analyzer not found: $ANALYZER_SOURCE"
+fi
+
+candidate_is_usable() {
+    local candidate="$1"
+    local install_root bringup_prefix launch_runtime fastlio_runtime
+    local odom_runtime fusion_runtime
+    install_root="$(dirname "$candidate")"
+    bringup_prefix="$install_root/fastlio_go2w_bringup"
+    launch_runtime="$bringup_prefix/share/fastlio_go2w_bringup/launch/offline_multilidar.launch.py"
+    fastlio_runtime="$install_root/fast_lio/lib/fast_lio/fastlio_mapping"
+    odom_runtime="$bringup_prefix/lib/fastlio_go2w_bringup/fastlio_odom_adapter"
+    fusion_runtime="$install_root/fastlio_go2w_fusion/lib/fastlio_go2w_fusion/dual_lidar_fusion_node"
+
+    [ -f "$candidate" ] || return 1
+    [ -f "$launch_runtime" ] || return 1
+    [ -x "$fastlio_runtime" ] || return 1
+    [ -x "$odom_runtime" ] || return 1
+    [ "$(sha256sum "$launch_runtime" | awk '{print $1}')" = "$LAUNCH_SHA256" ] \
+        || return 1
+    if [ "$PROFILE" != "baseline" ]; then
+        [ -x "$fusion_runtime" ] || return 1
+    fi
+
+    (
         set +u
         source "$candidate"
         set -u
-        if ! ros2 pkg prefix fastlio_go2w_bringup >/dev/null 2>&1; then
-            continue
+        [ "$(ros2 pkg prefix fastlio_go2w_bringup 2>/dev/null)" = "$bringup_prefix" ] \
+            || exit 1
+        [ "$(ros2 pkg prefix fast_lio 2>/dev/null)" = "$install_root/fast_lio" ] \
+            || exit 1
+        if [ "$PROFILE" != "baseline" ]; then
+            [ "$(ros2 pkg prefix fastlio_go2w_fusion 2>/dev/null)" \
+                = "$install_root/fastlio_go2w_fusion" ] || exit 1
         fi
-        if [ "$PROFILE" != "baseline" ] \
-            && ! ros2 pkg prefix fastlio_go2w_fusion >/dev/null 2>&1; then
-            continue
-        fi
+    )
+}
+
+WORKSPACE_SETUP=""
+for candidate in \
+    "$REPO_ROOT/.devcontainer/desktop_ws/install/setup.bash" \
+    "$REPO_ROOT/humble_ws/install/setup.bash"; do
+    if candidate_is_usable "$candidate"; then
         WORKSPACE_SETUP="$candidate"
         break
     fi
 done
-[ -n "$WORKSPACE_SETUP" ] || die "workspace is not built (no Humble install overlay found)"
+[ -n "$WORKSPACE_SETUP" ] \
+    || die "no usable current Humble workspace overlay was found; rebuild the workspace"
 set +u
 source "$WORKSPACE_SETUP"
 set -u
 
-for command in ros2 setsid python3 sha256sum; do
-    command -v "$command" >/dev/null || die "required command not found: $command"
-done
-ros2 pkg prefix fastlio_go2w_bringup >/dev/null 2>&1 \
-    || die "fastlio_go2w_bringup is absent from $WORKSPACE_SETUP; rebuild the workspace"
+INSTALL_ROOT="$(dirname "$WORKSPACE_SETUP")"
+BRINGUP_PREFIX="$INSTALL_ROOT/fastlio_go2w_bringup"
+LAUNCH_RUNTIME="$BRINGUP_PREFIX/share/fastlio_go2w_bringup/launch/offline_multilidar.launch.py"
+LAUNCH_RUNTIME_SHA256="$(sha256sum "$LAUNCH_RUNTIME" | awk '{print $1}')"
+FASTLIO_RUNTIME="$INSTALL_ROOT/fast_lio/lib/fast_lio/fastlio_mapping"
+ODOM_ADAPTER_RUNTIME="$BRINGUP_PREFIX/lib/fastlio_go2w_bringup/fastlio_odom_adapter"
+FASTLIO_RUNTIME_SHA256="$(sha256sum "$FASTLIO_RUNTIME" | awk '{print $1}')"
+ODOM_ADAPTER_RUNTIME_SHA256="$(sha256sum "$ODOM_ADAPTER_RUNTIME" | awk '{print $1}')"
+FUSION_RUNTIME=""
+FUSION_RUNTIME_SHA256=""
 if [ "$PROFILE" != "baseline" ]; then
-    ros2 pkg prefix fastlio_go2w_fusion >/dev/null 2>&1 \
-        || die "fastlio_go2w_fusion is absent from $WORKSPACE_SETUP; rebuild the workspace"
+    FUSION_RUNTIME="$INSTALL_ROOT/fastlio_go2w_fusion/lib/fastlio_go2w_fusion/dual_lidar_fusion_node"
+    FUSION_RUNTIME_SHA256="$(sha256sum "$FUSION_RUNTIME" | awk '{print $1}')"
 fi
+
+python3 -c 'import rosbag2_py' >/dev/null 2>&1 \
+    || die "rosbag2 Python support is required for result validation"
+if [ "$ANALYZE" = "true" ]; then
+    python3 -c 'import numpy, rclpy; from rosidl_runtime_py.utilities import get_message' \
+        >/dev/null 2>&1 || die "automatic analysis dependencies are unavailable"
+    python3 "$ANALYZER_SOURCE" analyze --help >/dev/null \
+        || die "analyzer CLI preflight failed"
+fi
+
+# Create the run directory only after all read-only source and overlay preflight passes.
+if [ -d "$OUTPUT_DIR" ] && [ -n "$(find "$OUTPUT_DIR" -mindepth 1 -print -quit)" ]; then
+    die "output directory is not empty: $OUTPUT_DIR"
+fi
+mkdir -p "$OUTPUT_DIR"
 
 export ROS_DOMAIN_ID="$DOMAIN_ID"
 export RCUTILS_COLORIZED_OUTPUT=0
 export ROS_LOG_DIR="$OUTPUT_DIR/ros-logs"
 mkdir -p "$ROS_LOG_DIR"
 
-if [ "$PROFILE" = "baseline" ]; then
-    FASTLIO_CONFIG="$REPO_ROOT/humble_ws/src/fastlio_go2w_bringup/config/mid360_offline_eval.yaml"
-else
-    FASTLIO_CONFIG="$REPO_ROOT/humble_ws/src/fastlio_go2w_bringup/config/mid360_xt16_fused.yaml"
-fi
-LAUNCH_SOURCE="$REPO_ROOT/humble_ws/src/fastlio_go2w_bringup/launch/offline_multilidar.launch.py"
+RESULT_BAG="$OUTPUT_DIR/rosbag"
 FASTLIO_CONFIG_SNAPSHOT="$OUTPUT_DIR/fastlio_config.yaml"
-BRINGUP_PREFIX="$(ros2 pkg prefix fastlio_go2w_bringup)"
-LAUNCH_RUNTIME="$BRINGUP_PREFIX/share/fastlio_go2w_bringup/launch/offline_multilidar.launch.py"
-[ -f "$LAUNCH_RUNTIME" ] \
-    || die "installed experiment launch not found: $LAUNCH_RUNTIME"
-LAUNCH_SHA256="$(sha256sum "$LAUNCH_SOURCE" | awk '{print $1}')"
-LAUNCH_RUNTIME_SHA256="$(sha256sum "$LAUNCH_RUNTIME" | awk '{print $1}')"
-[ "$LAUNCH_SHA256" = "$LAUNCH_RUNTIME_SHA256" ] \
-    || die "installed experiment launch is stale; rebuild $WORKSPACE_SETUP"
-
-FASTLIO_RUNTIME="$(ros2 pkg prefix fast_lio)/lib/fast_lio/fastlio_mapping"
-ODOM_ADAPTER_RUNTIME="$BRINGUP_PREFIX/lib/fastlio_go2w_bringup/fastlio_odom_adapter"
-[ -x "$FASTLIO_RUNTIME" ] || die "FAST-LIO executable not found: $FASTLIO_RUNTIME"
-[ -x "$ODOM_ADAPTER_RUNTIME" ] \
-    || die "odom adapter executable not found: $ODOM_ADAPTER_RUNTIME"
-FASTLIO_RUNTIME_SHA256="$(sha256sum "$FASTLIO_RUNTIME" | awk '{print $1}')"
-ODOM_ADAPTER_RUNTIME_SHA256="$(sha256sum "$ODOM_ADAPTER_RUNTIME" | awk '{print $1}')"
-FUSION_RUNTIME=""
-FUSION_RUNTIME_SHA256=""
+FASTLIO_PARAMETERS_SNAPSHOT="$OUTPUT_DIR/fastlio_mapping.yaml"
+FASTLIO_PARAMETERS_SHA256=""
+FUSION_PARAMETERS_SNAPSHOT=""
+FUSION_PARAMETERS_SHA256=""
 if [ "$PROFILE" != "baseline" ]; then
-    FUSION_RUNTIME="$(ros2 pkg prefix fastlio_go2w_fusion)/lib/fastlio_go2w_fusion/dual_lidar_fusion_node"
-    [ -x "$FUSION_RUNTIME" ] \
-        || die "fusion executable not found: $FUSION_RUNTIME"
-    FUSION_RUNTIME_SHA256="$(sha256sum "$FUSION_RUNTIME" | awk '{print $1}')"
+    FUSION_PARAMETERS_SNAPSHOT="$OUTPUT_DIR/dual_lidar_fusion.yaml"
 fi
+ANALYZER_SNAPSHOT=""
+ANALYZER_SHA256=""
+ANALYSIS_LOG=""
+if [ "$ANALYZE" = "true" ]; then
+    ANALYZER_SNAPSHOT="$OUTPUT_DIR/analyze_multilidar_run.py"
+    ANALYSIS_LOG="$OUTPUT_DIR/analysis.log"
+    cp "$ANALYZER_SOURCE" "$ANALYZER_SNAPSHOT"
+    ANALYZER_SHA256="$(sha256sum "$ANALYZER_SNAPSHOT" | awk '{print $1}')"
+fi
+PARAMETER_DUMP_LOG="$OUTPUT_DIR/parameter-dump.log"
+PARAMETER_VALIDATION_LOG="$OUTPUT_DIR/fastlio-parameter-validation.log"
+RESULT_BAG_VALIDATION_LOG="$OUTPUT_DIR/result-bag-validation.log"
+RESOURCE_VALIDATION_LOG="$OUTPUT_DIR/resource-validation.log"
 
 cp "$FASTLIO_CONFIG" "$FASTLIO_CONFIG_SNAPSHOT"
 git -C "$REPO_ROOT" status --short > "$OUTPUT_DIR/git-status.txt"
@@ -217,11 +331,16 @@ DURATION_MARKER="$OUTPUT_DIR/.duration-reached"
 RUN_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 CONFIG_SHA256="$(sha256sum "$FASTLIO_CONFIG_SNAPSHOT" | awk '{print $1}')"
 METADATA_SHA256="$(sha256sum "$BAG/metadata.yaml" | awk '{print $1}')"
-FUSION_PARAMETERS_SNAPSHOT=""
-FUSION_PARAMETERS_SHA256=""
-if [ "$PROFILE" != "baseline" ]; then
-    FUSION_PARAMETERS_SNAPSHOT="$OUTPUT_DIR/dual_lidar_fusion.yaml"
-fi
+RESULT_METADATA_SHA256=""
+RESOURCE_METRICS_SHA256=""
+RESOURCE_SUMMARY_SHA256=""
+DRAIN_STABLE_SECONDS="5"
+DRAIN_TIMEOUT_SECONDS="120"
+DRAIN_POLL_SECONDS="1"
+DRAIN_OUTCOME="not_started"
+DRAIN_ELAPSED_SECONDS=""
+DRAIN_FINAL_SIZE_BYTES=""
+DRAIN_FINAL_MTIME_NS=""
 
 GIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 
@@ -244,6 +363,8 @@ write_manifest() {
     EXP_FUSION_PARAMETERS="$FUSION_PARAMETERS_SNAPSHOT" \
     EXP_FUSION_PARAMETERS_SHA="$FUSION_PARAMETERS_SHA256" \
     EXP_RUNTIME_CONFIG="$FASTLIO_CONFIG_SNAPSHOT" \
+    EXP_FASTLIO_PARAMETERS="$FASTLIO_PARAMETERS_SNAPSHOT" \
+    EXP_FASTLIO_PARAMETERS_SHA="$FASTLIO_PARAMETERS_SHA256" \
     EXP_METADATA_SHA="$METADATA_SHA256" EXP_LAUNCH_SHA="$LAUNCH_SHA256" \
     EXP_GIT_COMMIT="$GIT_COMMIT" EXP_OUTPUT="$OUTPUT_DIR" \
     EXP_WORKSPACE_SETUP="$WORKSPACE_SETUP" \
@@ -256,6 +377,27 @@ write_manifest() {
     EXP_FUSION_RUNTIME_SHA="$FUSION_RUNTIME_SHA256" \
     EXP_LAUNCH_PID="$LAUNCH_PID" EXP_RECORDER_PID="$RECORDER_PID" \
     EXP_PLAYER_PID="$PLAYER_PID" EXP_SAMPLER_PID="$SAMPLER_PID" \
+    EXP_ANALYZE="$ANALYZE" EXP_MAP_VOXEL_SIZE="$MAP_VOXEL_SIZE" \
+    EXP_PREVIEW_MAX_POINTS="$PREVIEW_MAX_POINTS" \
+    EXP_PLANE_RANDOM_SEED="$PLANE_RANDOM_SEED" \
+    EXP_ANALYZER_SOURCE="$ANALYZER_SOURCE" \
+    EXP_ANALYZER_SNAPSHOT="$ANALYZER_SNAPSHOT" \
+    EXP_ANALYZER_SHA="$ANALYZER_SHA256" \
+    EXP_ANALYSIS_LOG="$ANALYSIS_LOG" \
+    EXP_RESULT_METADATA_SHA="$RESULT_METADATA_SHA256" \
+    EXP_RESOURCE_METRICS_SHA="$RESOURCE_METRICS_SHA256" \
+    EXP_RESOURCE_SUMMARY_SHA="$RESOURCE_SUMMARY_SHA256" \
+    EXP_PARAMETER_DUMP_LOG="$PARAMETER_DUMP_LOG" \
+    EXP_PARAMETER_VALIDATION_LOG="$PARAMETER_VALIDATION_LOG" \
+    EXP_RESULT_VALIDATION_LOG="$RESULT_BAG_VALIDATION_LOG" \
+    EXP_RESOURCE_VALIDATION_LOG="$RESOURCE_VALIDATION_LOG" \
+    EXP_DRAIN_STABLE_SECONDS="$DRAIN_STABLE_SECONDS" \
+    EXP_DRAIN_TIMEOUT_SECONDS="$DRAIN_TIMEOUT_SECONDS" \
+    EXP_DRAIN_POLL_SECONDS="$DRAIN_POLL_SECONDS" \
+    EXP_DRAIN_OUTCOME="$DRAIN_OUTCOME" \
+    EXP_DRAIN_ELAPSED_SECONDS="$DRAIN_ELAPSED_SECONDS" \
+    EXP_DRAIN_FINAL_SIZE_BYTES="$DRAIN_FINAL_SIZE_BYTES" \
+    EXP_DRAIN_FINAL_MTIME_NS="$DRAIN_FINAL_MTIME_NS" \
     python3 - "$MANIFEST" <<'PY'
 import json
 import os
@@ -285,6 +427,56 @@ def optional_float(value):
 def optional_int(value):
     return int(value) if value else None
 
+def optional_name(value):
+    return pathlib.Path(value).name if value else None
+
+analysis_enabled = env["EXP_ANALYZE"] == "true"
+analysis_details = {
+    "enabled": analysis_enabled,
+    "voxel_size_m": None,
+    "preview_max_points": None,
+    "plane_random_seed": None,
+    "analyzer_source": None,
+    "analyzer_snapshot": None,
+    "analyzer_sha256": None,
+    "log": None,
+    "artifacts": None,
+}
+if analysis_enabled:
+    analysis_details.update(
+        {
+            "voxel_size_m": float(env["EXP_MAP_VOXEL_SIZE"]),
+            "preview_max_points": int(env["EXP_PREVIEW_MAX_POINTS"]),
+            "plane_random_seed": int(env["EXP_PLANE_RANDOM_SEED"]),
+            "analyzer_source": env["EXP_ANALYZER_SOURCE"],
+            "analyzer_snapshot": optional_name(env["EXP_ANALYZER_SNAPSHOT"]),
+            "analyzer_sha256": env["EXP_ANALYZER_SHA"],
+            "log": optional_name(env["EXP_ANALYSIS_LOG"]),
+            "artifacts": {
+                "summary": "summary.json",
+                "map": "map_voxelized.pcd",
+                "map_preview": "map_preview.pcd",
+                "primary_trajectory": "trajectory.csv",
+                "camera_init_trajectory": "trajectory_camera_init.csv",
+            },
+        }
+    )
+
+run_logs = [
+    "launch.log",
+    "recorder.log",
+    "player.log",
+    "resume.log",
+    "metrics.log",
+    optional_name(env["EXP_PARAMETER_DUMP_LOG"]),
+    optional_name(env["EXP_PARAMETER_VALIDATION_LOG"]),
+    optional_name(env["EXP_RESULT_VALIDATION_LOG"]),
+    optional_name(env["EXP_RESOURCE_VALIDATION_LOG"]),
+]
+if analysis_enabled:
+    run_logs.append(optional_name(env["EXP_ANALYSIS_LOG"]))
+
+
 document = {
     "state": env["MANIFEST_STATE"],
     "exit_code": optional_int(env.get("MANIFEST_EXIT_CODE", "")),
@@ -302,14 +494,33 @@ document = {
         "rate": float(env["EXP_RATE"]),
         "ros_domain_id": int(env["EXP_DOMAIN_ID"]),
     },
+    "drain": {
+        "stable_seconds": float(env["EXP_DRAIN_STABLE_SECONDS"]),
+        "timeout_seconds": float(env["EXP_DRAIN_TIMEOUT_SECONDS"]),
+        "poll_seconds": float(env["EXP_DRAIN_POLL_SECONDS"]),
+        "outcome": env["EXP_DRAIN_OUTCOME"],
+        "elapsed_seconds": optional_float(env["EXP_DRAIN_ELAPSED_SECONDS"]),
+        "final_storage_size_bytes": optional_int(env["EXP_DRAIN_FINAL_SIZE_BYTES"]),
+        "final_storage_mtime_ns": optional_int(env["EXP_DRAIN_FINAL_MTIME_NS"]),
+    },
     "fastlio": {
         "config_source": env["EXP_CONFIG"],
         "config_snapshot": "fastlio_config.yaml",
         "runtime_config": env["EXP_RUNTIME_CONFIG"],
         "config_sha256": env["EXP_CONFIG_SHA"],
+        "parameters_snapshot": pathlib.Path(env["EXP_FASTLIO_PARAMETERS"]).name,
+        "parameters_sha256": env.get("EXP_FASTLIO_PARAMETERS_SHA") or None,
         "map_en": False,
+        "path_en": False,
+        "effect_map_en": False,
+        "scan_bodyframe_pub_en": False,
+        "scan_publish_en": True,
+        "dense_publish_en": False,
+        "pcd_save_en": False,
+        "runtime_pos_log_enable": False,
     },
     "fusion": fusion,
+    "analysis": analysis_details,
     "publish_debug_cloud": env["EXP_DEBUG_CLOUD"] == "true",
     "git": {
         "commit": env["EXP_GIT_COMMIT"],
@@ -338,10 +549,13 @@ document = {
     },
     "artifacts": {
         "recorded_bag": "rosbag",
+        "recorded_bag_metadata_sha256": env.get("EXP_RESULT_METADATA_SHA") or None,
         "resource_metrics": "resource_metrics.csv",
+        "resource_metrics_sha256": env.get("EXP_RESOURCE_METRICS_SHA") or None,
         "resource_summary": "resource_summary.json",
+        "resource_summary_sha256": env.get("EXP_RESOURCE_SUMMARY_SHA") or None,
         "commands": "commands.log",
-        "logs": ["launch.log", "recorder.log", "player.log", "resume.log", "metrics.log"],
+        "logs": run_logs,
     },
 }
 path = pathlib.Path(sys.argv[1])
@@ -351,30 +565,45 @@ temporary.replace(path)
 PY
 }
 
+process_group_alive() {
+    local pgid="${1:-}"
+    local stat_file record state ppid process_group
+    [ -n "$pgid" ] || return 1
+    for stat_file in /proc/[0-9]*/stat; do
+        IFS= read -r record 2>/dev/null < "$stat_file" || continue
+        record="${record##*) }"
+        read -r state ppid process_group _ <<<"$record"
+        [ "$process_group" = "$pgid" ] || continue
+        case "$state" in
+            Z|X) ;;
+            *) return 0 ;;
+        esac
+    done
+    return 1
+}
+
 stop_group() {
     local pid="${1:-}"
     local name="${2:-process}"
     [ -n "$pid" ] || return 0
-    if ! kill -0 "$pid" 2>/dev/null; then
-        wait "$pid" 2>/dev/null || true
-        return 0
-    fi
-    kill -INT -- "-$pid" 2>/dev/null || true
-    for _ in $(seq 1 50); do
-        kill -0 "$pid" 2>/dev/null || break
-        sleep 0.2
-    done
-    if kill -0 "$pid" 2>/dev/null; then
-        echo "Escalating $name cleanup to SIGTERM." >&2
-        kill -TERM -- "-$pid" 2>/dev/null || true
-        for _ in $(seq 1 25); do
-            kill -0 "$pid" 2>/dev/null || break
+    if process_group_alive "$pid"; then
+        kill -INT -- "-$pid" 2>/dev/null || true
+        for _ in $(seq 1 50); do
+            process_group_alive "$pid" || break
             sleep 0.2
         done
-    fi
-    if kill -0 "$pid" 2>/dev/null; then
-        echo "Escalating $name cleanup to SIGKILL." >&2
-        kill -KILL -- "-$pid" 2>/dev/null || true
+        if process_group_alive "$pid"; then
+            echo "Escalating $name cleanup to SIGTERM." >&2
+            kill -TERM -- "-$pid" 2>/dev/null || true
+            for _ in $(seq 1 25); do
+                process_group_alive "$pid" || break
+                sleep 0.2
+            done
+        fi
+        if process_group_alive "$pid"; then
+            echo "Escalating $name cleanup to SIGKILL." >&2
+            kill -KILL -- "-$pid" 2>/dev/null || true
+        fi
     fi
     wait "$pid" 2>/dev/null || true
 }
@@ -408,7 +637,7 @@ wait_for_node() {
     local deadline=$((SECONDS + 90))
     while [ "$SECONDS" -lt "$deadline" ]; do
         kill -0 "$LAUNCH_PID" 2>/dev/null || return 1
-        if ros2 node list 2>/dev/null | grep -Fxq "$expected"; then
+        if ros2 node list --no-daemon 2>/dev/null | grep -Fxq "$expected"; then
             return 0
         fi
         sleep 0.5
@@ -421,7 +650,7 @@ wait_for_service() {
     local deadline=$((SECONDS + 90))
     while [ "$SECONDS" -lt "$deadline" ]; do
         kill -0 "$PLAYER_PID" 2>/dev/null || return 1
-        if ros2 service list 2>/dev/null | grep -Fxq "$expected"; then
+        if ros2 service list --no-daemon 2>/dev/null | grep -Fxq "$expected"; then
             return 0
         fi
         sleep 0.5
@@ -439,7 +668,7 @@ wait_for_topic() {
         kill -0 "$LAUNCH_PID" 2>/dev/null || return 1
         kill -0 "$RECORDER_PID" 2>/dev/null || return 1
         kill -0 "$PLAYER_PID" 2>/dev/null || return 1
-        info="$(ros2 topic info "$topic" 2>/dev/null || true)"
+        info="$(ros2 topic info --no-daemon "$topic" 2>/dev/null || true)"
         publishers="$(awk '/Publisher count:/{print $3}' <<<"$info")"
         subscribers="$(awk '/Subscription count:/{print $3}' <<<"$info")"
         if [ "${publishers:-0}" -ge "$minimum_publishers" ] \
@@ -451,6 +680,41 @@ wait_for_topic() {
     return 1
 }
 
+assert_fastlio_parameter() {
+    local name="$1"
+    local expected="$2"
+    local actual
+    if ! actual="$(ros2 param get --no-daemon --hide-type /fastlio_mapping "$name")"; then
+        echo "Could not read FAST-LIO parameter $name." >&2
+        return 1
+    fi
+    if [ "$actual" != "$expected" ]; then
+        echo "FAST-LIO parameter $name is '$actual', expected '$expected'." >&2
+        return 1
+    fi
+}
+
+validate_fastlio_parameters() {
+    local expected_lid_topic expected_scan_line
+    if [ "$PROFILE" = "baseline" ]; then
+        expected_lid_topic="/livox/lidar"
+        expected_scan_line="4"
+    else
+        expected_lid_topic="/livox/lidar_fused"
+        expected_scan_line="20"
+    fi
+    assert_fastlio_parameter common.lid_topic "$expected_lid_topic" || return 1
+    assert_fastlio_parameter preprocess.scan_line "$expected_scan_line" || return 1
+    assert_fastlio_parameter publish.map_en False || return 1
+    assert_fastlio_parameter publish.path_en False || return 1
+    assert_fastlio_parameter publish.effect_map_en False || return 1
+    assert_fastlio_parameter publish.scan_bodyframe_pub_en False || return 1
+    assert_fastlio_parameter publish.scan_publish_en True || return 1
+    assert_fastlio_parameter publish.dense_publish_en False || return 1
+    assert_fastlio_parameter pcd_save.pcd_save_en False || return 1
+    assert_fastlio_parameter runtime_pos_log_enable False || return 1
+}
+
 required_processing_nodes_alive() {
     local nodes
     local required=(/fastlio_mapping /fastlio_odom_adapter)
@@ -458,11 +722,363 @@ required_processing_nodes_alive() {
         required+=(/dual_lidar_fusion)
     fi
 
-    nodes="$(ros2 node list 2>/dev/null)" || return 1
+    nodes="$(ros2 node list --no-daemon 2>/dev/null)" || return 1
     for node in "${required[@]}"; do
         grep -Fxq "$node" <<<"$nodes" || return 1
     done
     return 0
+}
+
+bag_storage_signature() {
+    python3 - "$RESULT_BAG" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+if not root.is_dir():
+    print("0 0")
+    raise SystemExit(0)
+
+stats = []
+for path in root.rglob("*"):
+    try:
+        if path.is_file():
+            stats.append(path.stat())
+    except FileNotFoundError:
+        continue
+print(sum(stat.st_size for stat in stats), max((stat.st_mtime_ns for stat in stats), default=0))
+PY
+}
+
+wait_for_processing_quiescence() {
+    local started_at="$SECONDS"
+    local stable_since="$SECONDS"
+    local previous_signature=""
+    local signature current_size current_mtime elapsed stable_elapsed
+    local node_misses=0
+
+    DRAIN_OUTCOME="waiting"
+    DRAIN_ELAPSED_SECONDS="0"
+    echo "Waiting for result bag writes to remain unchanged for ${DRAIN_STABLE_SECONDS}s..."
+
+    while [ $((SECONDS - started_at)) -lt "$DRAIN_TIMEOUT_SECONDS" ]; do
+        if ! kill -0 "$LAUNCH_PID" 2>/dev/null; then
+            DRAIN_OUTCOME="processing_launch_exited"
+            DRAIN_ELAPSED_SECONDS="$((SECONDS - started_at))"
+            echo "Processing launch exited while waiting for quiescence." >&2
+            return 1
+        fi
+        if ! kill -0 "$RECORDER_PID" 2>/dev/null; then
+            DRAIN_OUTCOME="recorder_exited"
+            DRAIN_ELAPSED_SECONDS="$((SECONDS - started_at))"
+            echo "Rosbag recorder exited while waiting for quiescence." >&2
+            return 1
+        fi
+        if ! kill -0 "$SAMPLER_PID" 2>/dev/null; then
+            DRAIN_OUTCOME="resource_sampler_exited"
+            DRAIN_ELAPSED_SECONDS="$((SECONDS - started_at))"
+            echo "Resource sampler exited while waiting for quiescence." >&2
+            return 1
+        fi
+
+        if required_processing_nodes_alive; then
+            node_misses=0
+        else
+            node_misses=$((node_misses + 1))
+            if [ "$node_misses" -ge 3 ]; then
+                DRAIN_OUTCOME="processing_node_missing"
+                DRAIN_ELAPSED_SECONDS="$((SECONDS - started_at))"
+                echo "Required processing node disappeared while waiting for quiescence." >&2
+                return 1
+            fi
+        fi
+
+        if ! signature="$(bag_storage_signature)"; then
+            DRAIN_OUTCOME="storage_signature_failed"
+            DRAIN_ELAPSED_SECONDS="$((SECONDS - started_at))"
+            echo "Could not inspect result bag storage while waiting for quiescence." >&2
+            return 1
+        fi
+        read -r current_size current_mtime <<<"$signature"
+        if ! [[ "$current_size" =~ ^[0-9]+$ && "$current_mtime" =~ ^[0-9]+$ ]]; then
+            DRAIN_OUTCOME="invalid_storage_signature"
+            DRAIN_ELAPSED_SECONDS="$((SECONDS - started_at))"
+            echo "Result bag storage signature is invalid: $signature" >&2
+            return 1
+        fi
+
+        DRAIN_FINAL_SIZE_BYTES="$current_size"
+        DRAIN_FINAL_MTIME_NS="$current_mtime"
+        elapsed=$((SECONDS - started_at))
+        DRAIN_ELAPSED_SECONDS="$elapsed"
+
+        if [ -n "$previous_signature" ] && [ "$signature" = "$previous_signature" ]; then
+            stable_elapsed=$((SECONDS - stable_since))
+        else
+            previous_signature="$signature"
+            stable_since="$SECONDS"
+            stable_elapsed=0
+        fi
+
+        if [ "$current_size" -gt 0 ] && [ "$stable_elapsed" -ge "$DRAIN_STABLE_SECONDS" ]; then
+            DRAIN_OUTCOME="quiescent"
+            echo "Result bag storage is quiescent after ${elapsed}s."
+            return 0
+        fi
+        sleep "$DRAIN_POLL_SECONDS"
+    done
+
+    DRAIN_OUTCOME="timeout"
+    DRAIN_ELAPSED_SECONDS="$((SECONDS - started_at))"
+    echo "Result bag did not remain unchanged for ${DRAIN_STABLE_SECONDS}s within the ${DRAIN_TIMEOUT_SECONDS}s timeout." >&2
+    return 1
+}
+
+validate_result_bag() {
+    local metadata="$RESULT_BAG/metadata.yaml"
+    [ -s "$metadata" ] || {
+        echo "Finalized result bag metadata is missing or empty: $metadata" >&2
+        return 1
+    }
+
+    echo "ros2 bag info:"
+    ros2 bag info "$RESULT_BAG"
+    echo
+    echo "metadata and reader validation:"
+    python3 - "$RESULT_BAG" "$PROFILE" "$DEBUG_CLOUD" <<'PY'
+from pathlib import Path
+import json
+import sys
+
+import rosbag2_py
+import yaml
+
+root = Path(sys.argv[1]).resolve()
+profile = sys.argv[2]
+debug_cloud = sys.argv[3] == "true"
+metadata_path = root / "metadata.yaml"
+
+try:
+    document = yaml.safe_load(metadata_path.read_text(encoding="utf-8"))
+except (OSError, yaml.YAMLError) as exc:
+    raise SystemExit(f"could not parse finalized metadata: {exc}") from exc
+
+if not isinstance(document, dict):
+    raise SystemExit("finalized metadata is not a mapping")
+information = document.get("rosbag2_bagfile_information", document)
+if not isinstance(information, dict):
+    raise SystemExit("rosbag2_bagfile_information is not a mapping")
+
+storage_id = information.get("storage_identifier")
+if not isinstance(storage_id, str) or not storage_id:
+    raise SystemExit("metadata has no storage identifier")
+
+relative_paths = information.get("relative_file_paths")
+if not isinstance(relative_paths, list) or not relative_paths:
+    raise SystemExit("metadata has no storage files")
+storage_files = []
+for value in relative_paths:
+    relative = Path(str(value))
+    if relative.is_absolute() or ".." in relative.parts:
+        raise SystemExit(f"unsafe storage path in metadata: {value!r}")
+    storage_path = (root / relative).resolve()
+    try:
+        storage_path.relative_to(root)
+    except ValueError as exc:
+        raise SystemExit(f"storage path escapes result bag: {value!r}") from exc
+    if not storage_path.is_file() or storage_path.stat().st_size <= 0:
+        raise SystemExit(f"storage file is missing or empty: {relative}")
+    storage_files.append(
+        {"path": str(relative), "size_bytes": storage_path.stat().st_size}
+    )
+
+topics = information.get("topics_with_message_count")
+if not isinstance(topics, list):
+    raise SystemExit("metadata has no topic message counts")
+counts = {}
+types = {}
+for item in topics:
+    if not isinstance(item, dict):
+        raise SystemExit("invalid topic message-count entry")
+    topic_metadata = item.get("topic_metadata")
+    if not isinstance(topic_metadata, dict):
+        raise SystemExit("topic entry has no topic_metadata")
+    name = topic_metadata.get("name")
+    type_name = topic_metadata.get("type")
+    if not isinstance(name, str) or not name:
+        raise SystemExit("topic entry has no valid name")
+    try:
+        count = int(item.get("message_count"))
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"invalid message count for {name}") from exc
+    if count < 0:
+        raise SystemExit(f"negative message count for {name}")
+    counts[name] = counts.get(name, 0) + count
+    types[name] = type_name
+
+try:
+    total_count = int(information.get("message_count"))
+except (TypeError, ValueError) as exc:
+    raise SystemExit("metadata has no valid total message count") from exc
+if total_count <= 0:
+    raise SystemExit("result bag contains no messages")
+if total_count != sum(counts.values()):
+    raise SystemExit(
+        f"metadata total message count {total_count} does not match topic sum {sum(counts.values())}"
+    )
+
+required = ["/odom", "/Odometry", "/cloud_registered"]
+if profile != "baseline":
+    required.append("/fastlio_go2w_fusion/diagnostics")
+    if debug_cloud:
+        required.append("/livox/lidar_fused_debug")
+missing = [name for name in required if counts.get(name, 0) <= 0]
+if missing:
+    raise SystemExit(
+        "required result topics have no recorded messages: " + ", ".join(missing)
+    )
+
+reader = rosbag2_py.SequentialReader()
+reader.open(
+    rosbag2_py.StorageOptions(uri=str(root), storage_id=storage_id),
+    rosbag2_py.ConverterOptions("", ""),
+)
+reader_topics = {entry.name for entry in reader.get_all_topics_and_types()}
+missing_from_reader = sorted(set(required) - reader_topics)
+if missing_from_reader:
+    raise SystemExit(
+        "required topics are not readable through rosbag2: "
+        + ", ".join(missing_from_reader)
+    )
+if not reader.has_next():
+    raise SystemExit("rosbag2 reader opened the result bag but found no messages")
+first_topic, first_data, first_timestamp = reader.read_next()
+if not first_data:
+    raise SystemExit("the first serialized result message is empty")
+
+print(
+    json.dumps(
+        {
+            "storage_id": storage_id,
+            "storage_files": storage_files,
+            "total_messages": total_count,
+            "required_topic_counts": {name: counts[name] for name in required},
+            "required_topic_types": {name: types.get(name) for name in required},
+            "first_readable_message": {
+                "topic": first_topic,
+                "timestamp_ns": first_timestamp,
+                "serialized_bytes": len(first_data),
+            },
+        },
+        indent=2,
+        sort_keys=True,
+    )
+)
+PY
+}
+
+validate_resource_artifacts() {
+    python3 - "$METRICS_CSV" "$METRICS_SUMMARY" "$PROFILE" <<'PY'
+from collections import Counter
+from pathlib import Path
+import csv
+import json
+import sys
+
+csv_path = Path(sys.argv[1])
+summary_path = Path(sys.argv[2])
+profile = sys.argv[3]
+required = {"fastlio", "player", "recorder"}
+if profile != "baseline":
+    required.add("fusion")
+
+if not csv_path.is_file() or csv_path.stat().st_size <= 0:
+    raise SystemExit(f"resource metrics CSV is missing or empty: {csv_path}")
+if not summary_path.is_file() or summary_path.stat().st_size <= 0:
+    raise SystemExit(f"resource summary is missing or empty: {summary_path}")
+
+counts = Counter()
+with csv_path.open(newline="", encoding="utf-8") as stream:
+    reader = csv.DictReader(stream)
+    required_columns = {"wall_time_s", "pid", "process", "cpu_time_s", "rss_kib"}
+    missing_columns = required_columns - set(reader.fieldnames or ())
+    if missing_columns:
+        raise SystemExit(
+            "resource metrics CSV is missing columns: "
+            + ", ".join(sorted(missing_columns))
+        )
+    for line_number, row in enumerate(reader, start=2):
+        label = row.get("process", "")
+        if not label:
+            raise SystemExit(f"resource metrics row {line_number} has no process label")
+        try:
+            wall_time = float(row["wall_time_s"])
+            pid = int(row["pid"])
+            cpu_time = float(row["cpu_time_s"])
+            rss_kib = int(row["rss_kib"])
+        except (TypeError, ValueError) as exc:
+            raise SystemExit(
+                f"resource metrics row {line_number} contains invalid numeric data"
+            ) from exc
+        if wall_time < 0 or pid <= 0 or cpu_time < 0 or rss_kib < 0:
+            raise SystemExit(
+                f"resource metrics row {line_number} contains out-of-range data"
+            )
+        counts[label] += 1
+
+missing_rows = sorted(label for label in required if counts[label] <= 0)
+if missing_rows:
+    raise SystemExit(
+        "resource metrics CSV has no samples for: " + ", ".join(missing_rows)
+    )
+
+try:
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"could not parse resource summary: {exc}") from exc
+if not isinstance(summary, dict):
+    raise SystemExit("resource summary is not an object")
+try:
+    interval = float(summary["interval_s"])
+    elapsed = float(summary["elapsed_wall_time_s"])
+except (KeyError, TypeError, ValueError) as exc:
+    raise SystemExit("resource summary timing fields are invalid") from exc
+if interval <= 0 or elapsed <= 0:
+    raise SystemExit("resource summary timing fields must be positive")
+
+processes = summary.get("processes")
+if not isinstance(processes, dict):
+    raise SystemExit("resource summary has no processes object")
+validated = {}
+for label in sorted(required):
+    details = processes.get(label)
+    if not isinstance(details, dict):
+        raise SystemExit(f"resource summary has no entry for {label}")
+    try:
+        samples = int(details["samples"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SystemExit(f"resource summary sample count is invalid for {label}") from exc
+    pids = details.get("pids")
+    if samples <= 0 or not isinstance(pids, list) or not pids:
+        raise SystemExit(f"resource summary has no usable samples for {label}")
+    if samples != counts[label]:
+        raise SystemExit(
+            f"resource sample mismatch for {label}: CSV={counts[label]}, summary={samples}"
+        )
+    validated[label] = {"samples": samples, "pids": pids}
+
+print(
+    json.dumps(
+        {
+            "elapsed_wall_time_s": elapsed,
+            "interval_s": interval,
+            "processes": validated,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+)
+PY
 }
 
 LAUNCH_CMD=(
@@ -474,17 +1090,30 @@ RECORD_TOPICS=(/odom /Odometry /cloud_registered /fastlio_go2w_fusion/diagnostic
 if [ "$DEBUG_CLOUD" = "true" ]; then
     RECORD_TOPICS+=(/livox/lidar_fused_debug)
 fi
-RECORDER_CMD=(ros2 bag record --use-sim-time -o "$OUTPUT_DIR/rosbag" "${RECORD_TOPICS[@]}")
+RECORDER_CMD=(ros2 bag record --use-sim-time -o "$RESULT_BAG" "${RECORD_TOPICS[@]}")
 PLAYER_CMD=(
     ros2 bag play "$BAG" --clock --rate "$RATE" --start-paused
     --disable-keyboard-controls --start-offset "$START_OFFSET"
     --topics /livox/lidar /livox/imu /points_raw
 )
-
+ANALYZE_CMD=()
+if [ "$ANALYZE" = "true" ]; then
+    ANALYZE_CMD=(
+        python3 "$ANALYZER_SNAPSHOT" analyze "$RESULT_BAG"
+        --output-dir "$OUTPUT_DIR"
+        --label "$PROFILE"
+        --voxel-size "$MAP_VOXEL_SIZE"
+        --preview-max-points "$PREVIEW_MAX_POINTS"
+        --plane-random-seed "$PLANE_RANDOM_SEED"
+    )
+fi
 {
     printf 'launch:'; printf ' %q' "${LAUNCH_CMD[@]}"; printf '\n'
     printf 'record:'; printf ' %q' "${RECORDER_CMD[@]}"; printf '\n'
     printf 'play:'; printf ' %q' "${PLAYER_CMD[@]}"; printf '\n'
+    if [ "$ANALYZE" = "true" ]; then
+        printf 'analyze:'; printf ' %q' "${ANALYZE_CMD[@]}"; printf '\n'
+    fi
 } > "$OUTPUT_DIR/commands.log"
 
 write_manifest "starting"
@@ -505,6 +1134,17 @@ wait_for_node /fastlio_odom_adapter || die "odom adapter did not become ready; s
 if [ "$PROFILE" != "baseline" ]; then
     wait_for_node /dual_lidar_fusion || die "fusion node did not become ready; see launch.log"
 fi
+ros2 param dump --no-daemon --output-dir "$OUTPUT_DIR" /fastlio_mapping \
+    > "$PARAMETER_DUMP_LOG" 2>&1
+[ -s "$FASTLIO_PARAMETERS_SNAPSHOT" ] \
+    || die "FAST-LIO parameter snapshot was not created"
+validate_fastlio_parameters \
+    > "$PARAMETER_VALIDATION_LOG" 2>&1 \
+    || {
+        tail -n 40 "$PARAMETER_VALIDATION_LOG" >&2 || true
+        die "FAST-LIO live parameters violate the offline artifact contract"
+    }
+FASTLIO_PARAMETERS_SHA256="$(sha256sum "$FASTLIO_PARAMETERS_SNAPSHOT" | awk '{print $1}')"
 wait_for_service /rosbag2_player/resume || die "rosbag player resume service did not appear"
 
 wait_for_topic /livox/lidar 1 1 || die "/livox/lidar endpoints did not become ready"
@@ -521,8 +1161,8 @@ wait_for_topic /Odometry 1 1 || die "/Odometry endpoints did not become ready"
 wait_for_topic /odom 1 1 || die "/odom endpoints did not become ready"
 wait_for_topic /cloud_registered 1 1 || die "/cloud_registered endpoints did not become ready"
 if [ "$PROFILE" != "baseline" ]; then
-    ros2 param dump --output-dir "$OUTPUT_DIR" /dual_lidar_fusion \
-        > "$OUTPUT_DIR/parameter-dump.log" 2>&1
+    ros2 param dump --no-daemon --output-dir "$OUTPUT_DIR" /dual_lidar_fusion \
+        >> "$PARAMETER_DUMP_LOG" 2>&1
     [ -s "$FUSION_PARAMETERS_SNAPSHOT" ] \
         || die "fusion parameter snapshot was not created"
     FUSION_PARAMETERS_SHA256="$(sha256sum "$FUSION_PARAMETERS_SNAPSHOT" | awk '{print $1}')"
@@ -542,8 +1182,7 @@ fi
 setsid "${SAMPLER_CMD[@]}" > "$OUTPUT_DIR/metrics.log" 2>&1 &
 SAMPLER_PID=$!
 
-RESUME_TYPE="$(ros2 service type /rosbag2_player/resume 2>/dev/null)"
-[ -n "$RESUME_TYPE" ] || die "could not determine rosbag resume service type"
+RESUME_TYPE="rosbag2_interfaces/srv/Resume"
 ros2 service call /rosbag2_player/resume "$RESUME_TYPE" "{}" \
     > "$OUTPUT_DIR/resume.log" 2>&1
 write_manifest "running"
@@ -592,12 +1231,12 @@ kill -0 "$RECORDER_PID" 2>/dev/null || die "rosbag recorder exited before drain"
 kill -0 "$SAMPLER_PID" 2>/dev/null || die "resource sampler exited before drain"
 required_processing_nodes_alive || die "required processing node missing before drain"
 
-# Give FAST-LIO and the recorder a short opportunity to drain final messages.
-sleep 2
-kill -0 "$LAUNCH_PID" 2>/dev/null || die "processing launch exited during drain"
-kill -0 "$RECORDER_PID" 2>/dev/null || die "rosbag recorder exited during drain"
-kill -0 "$SAMPLER_PID" 2>/dev/null || die "resource sampler exited during drain"
-required_processing_nodes_alive || die "required processing node missing during drain"
+write_manifest "draining"
+if ! wait_for_processing_quiescence; then
+    die "processing drain failed ($DRAIN_OUTCOME); result bag never became safely quiescent"
+fi
+write_manifest "drained"
+
 stop_group "$RECORDER_PID" "rosbag recorder"
 stop_group "$LAUNCH_PID" "processing launch"
 touch "$STOP_FILE"
@@ -607,6 +1246,34 @@ for _ in $(seq 1 30); do
 done
 stop_group "$SAMPLER_PID" "resource sampler"
 
+write_manifest "validating"
+if ! validate_result_bag > "$RESULT_BAG_VALIDATION_LOG" 2>&1; then
+    tail -n 40 "$RESULT_BAG_VALIDATION_LOG" >&2 || true
+    die "finalized result bag validation failed; see $RESULT_BAG_VALIDATION_LOG"
+fi
+RESULT_METADATA_SHA256="$(sha256sum "$RESULT_BAG/metadata.yaml" | awk '{print $1}')"
+
+if ! validate_resource_artifacts > "$RESOURCE_VALIDATION_LOG" 2>&1; then
+    tail -n 40 "$RESOURCE_VALIDATION_LOG" >&2 || true
+    die "resource artifact validation failed; see $RESOURCE_VALIDATION_LOG"
+fi
+RESOURCE_METRICS_SHA256="$(sha256sum "$METRICS_CSV" | awk '{print $1}')"
+RESOURCE_SUMMARY_SHA256="$(sha256sum "$METRICS_SUMMARY" | awk '{print $1}')"
+
+if [ "$ANALYZE" = "true" ]; then
+    write_manifest "analyzing"
+    echo "Generating final map and trajectory artifacts..."
+    if ! "${ANALYZE_CMD[@]}" > "$ANALYSIS_LOG" 2>&1; then
+        tail -n 40 "$ANALYSIS_LOG" >&2 || true
+        die "artifact analysis failed; see $ANALYSIS_LOG"
+    fi
+    for artifact in summary.json map_voxelized.pcd map_preview.pcd trajectory.csv trajectory_camera_init.csv; do
+        [ -s "$OUTPUT_DIR/$artifact" ] \
+            || die "artifact analysis did not create $artifact"
+    done
+fi
+
+rm -f "$STOP_FILE" "$DURATION_MARKER"
 write_manifest "completed" 0
 CLEANUP_COMPLETE="true"
 trap - EXIT INT TERM

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import sys
@@ -33,6 +34,60 @@ class PoseSample:
     bag_stamp_ns: int
     position: tuple[float, float, float]
     orientation_xyzw: tuple[float, float, float, float]
+    frame_id: str = ""
+    child_frame_id: str = ""
+
+
+class FrameIdTracker:
+    """Track one optional frame ID and reject ambiguous mixed-frame data."""
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self._frame_id = ""
+
+    @property
+    def frame_id(self) -> str:
+        return self._frame_id
+
+    def add(self, frame_id: Any) -> None:
+        normalized = str(frame_id or "")
+        if not normalized:
+            return
+        if not self._frame_id:
+            self._frame_id = normalized
+            return
+        if normalized != self._frame_id:
+            raise ValueError(
+                f"{self.label} contains mixed nonempty frame IDs: "
+                f"{self._frame_id!r} and {normalized!r}"
+            )
+
+
+def _sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _artifact_record(path: Path) -> dict[str, Any]:
+    return {
+        "path": path.name,
+        "sha256": _sha256_file(path),
+        "size_bytes": path.stat().st_size,
+    }
+
+
+def _canonical_json_sha256(value: Any) -> str:
+    payload = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return _sha256_bytes(payload)
 
 
 def _distribution(values: Sequence[float] | np.ndarray) -> dict[str, float | int | None]:
@@ -272,12 +327,15 @@ class VoxelAccumulator:
             raise ValueError("radius_m must be positive")
         if min_points < 3:
             raise ValueError("min_points must be at least 3")
-        keys = list(self._voxels)
+        keys = sorted(self._voxels)
         if not keys:
             return {
                 "radius_m": radius_m,
                 "minimum_points": min_points,
+                "maximum_sample_count": max_samples,
+                "random_seed": random_seed,
                 "sampled_voxel_count": 0,
+                "sampled_voxel_key_sha256": _canonical_json_sha256([]),
                 "valid_neighborhood_count": 0,
                 "plane_thickness_m": _distribution([]),
                 "planarity": _distribution([]),
@@ -332,7 +390,10 @@ class VoxelAccumulator:
         return {
             "radius_m": radius_m,
             "minimum_points": min_points,
+            "maximum_sample_count": max_samples,
+            "random_seed": random_seed,
             "sampled_voxel_count": len(sample_keys),
+            "sampled_voxel_key_sha256": _canonical_json_sha256(sample_keys),
             "valid_neighborhood_count": len(thicknesses),
             "plane_thickness_m": _distribution(thicknesses),
             "planarity": _distribution(planarities),
@@ -483,6 +544,11 @@ def _message_stamp_ns(message: Any, bag_stamp_ns: int) -> int:
         return int(bag_stamp_ns)
 
 
+def _message_frame_id(message: Any) -> str:
+    header = getattr(message, "header", None)
+    return str(getattr(header, "frame_id", "") or "")
+
+
 def _pose_sample(message: Any, bag_stamp_ns: int) -> PoseSample:
     pose = message.pose.pose
     return PoseSample(
@@ -495,6 +561,8 @@ def _pose_sample(message: Any, bag_stamp_ns: int) -> PoseSample:
             float(pose.orientation.z),
             float(pose.orientation.w),
         ),
+        frame_id=_message_frame_id(message),
+        child_frame_id=str(getattr(message, "child_frame_id", "") or ""),
     )
 
 
@@ -616,7 +684,7 @@ def _write_trajectory_csv(path: Path, topic: str, samples: Sequence[PoseSample])
     path.parent.mkdir(parents=True, exist_ok=True)
     origin_ns = samples[0].stamp_ns if samples else 0
     with path.open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.writer(stream)
+        writer = csv.writer(stream, lineterminator="\n")
         writer.writerow(
             [
                 "topic",
@@ -630,6 +698,8 @@ def _write_trajectory_csv(path: Path, topic: str, samples: Sequence[PoseSample])
                 "qy",
                 "qz",
                 "qw",
+                "frame_id",
+                "child_frame_id",
             ]
         )
         for sample in samples:
@@ -641,8 +711,65 @@ def _write_trajectory_csv(path: Path, topic: str, samples: Sequence[PoseSample])
                     sample.bag_stamp_ns,
                     *sample.position,
                     *sample.orientation_xyzw,
+                    sample.frame_id,
+                    sample.child_frame_id,
                 ]
             )
+
+
+def _write_trajectory_artifacts(
+    output_dir: Path,
+    trajectories: Mapping[str, Sequence[PoseSample]],
+    primary_topic: str,
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    primary_samples = trajectories[primary_topic]
+    primary_path = output_dir / "trajectory.csv"
+    _write_trajectory_csv(primary_path, primary_topic, primary_samples)
+    primary_record = _artifact_record(primary_path)
+
+    artifacts: dict[str, dict[str, Any]] = {}
+    for topic, samples in trajectories.items():
+        if not samples:
+            continue
+        if topic == "/Odometry":
+            path = output_dir / "trajectory_camera_init.csv"
+        elif topic == primary_topic:
+            path = primary_path
+        else:
+            safe_topic = topic.strip("/").replace("/", "_") or "root"
+            path = output_dir / f"trajectory_{safe_topic}.csv"
+        if path != primary_path:
+            _write_trajectory_csv(path, topic, samples)
+        frame_ids = sorted({sample.frame_id for sample in samples if sample.frame_id})
+        child_frame_ids = sorted(
+            {sample.child_frame_id for sample in samples if sample.child_frame_id}
+        )
+        artifacts[topic] = {
+            **_artifact_record(path),
+            "frame_id": frame_ids[0] if len(frame_ids) == 1 else "",
+            "child_frame_id": child_frame_ids[0] if len(child_frame_ids) == 1 else "",
+            "frame_ids": frame_ids,
+            "child_frame_ids": child_frame_ids,
+        }
+    return primary_record, artifacts
+
+
+def _stable_preview(
+    centroids: np.ndarray, counts: np.ndarray, max_points: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Select evenly spaced entries from already sorted voxel centroids."""
+    if max_points <= 0:
+        raise ValueError("preview_max_points must be positive")
+    point_count = int(centroids.shape[0])
+    if point_count <= max_points:
+        return centroids, counts
+    if max_points == 1:
+        indexes = np.asarray([(point_count - 1) // 2], dtype=np.int64)
+    else:
+        indexes = (
+            np.arange(max_points, dtype=np.int64) * (point_count - 1)
+        ) // (max_points - 1)
+    return centroids[indexes], counts[indexes]
 
 
 def analyze_bag(args: argparse.Namespace) -> int:
@@ -683,6 +810,7 @@ def analyze_bag(args: argparse.Namespace) -> int:
 
     trajectories: dict[str, list[PoseSample]] = {topic: [] for topic in ODOMETRY_TOPICS}
     voxel_map = VoxelAccumulator(args.voxel_size, args.voxel_chunk_points)
+    cloud_frames = FrameIdTracker(CLOUD_TOPIC)
     diagnostics = DiagnosticCollector()
     topic_message_counts: Counter[str] = Counter()
     selected_message_count = 0
@@ -699,6 +827,7 @@ def analyze_bag(args: argparse.Namespace) -> int:
         if topic in trajectories:
             trajectories[topic].append(_pose_sample(message, bag_stamp_ns))
         elif topic == CLOUD_TOPIC:
+            cloud_frames.add(_message_frame_id(message))
             try:
                 voxel_map.add(pointcloud2_xyz(message))
             except ValueError as error:
@@ -718,25 +847,47 @@ def analyze_bag(args: argparse.Namespace) -> int:
         raise RuntimeError(
             "result bag contains no finite /cloud_registered map points"
         )
-    trajectory_path = output_dir / "trajectory.csv"
-    _write_trajectory_csv(trajectory_path, primary_topic, primary_samples)
+    trajectory_record, trajectory_artifacts = _write_trajectory_artifacts(
+        output_dir, trajectories, primary_topic
+    )
+    trajectory_path = output_dir / trajectory_record["path"]
 
     local_planes = voxel_map.local_plane_metrics(
         radius_m=args.plane_radius,
         min_points=args.plane_min_points,
         max_samples=args.plane_max_samples,
+        random_seed=args.plane_random_seed,
     )
     centroids, counts, _ = voxel_map.sorted_centroids()
     pcd_path = output_dir / "map_voxelized.pcd"
     write_pcd(pcd_path, centroids, counts, args.pcd_format)
+    preview_centroids, preview_counts = _stable_preview(
+        centroids, counts, args.preview_max_points
+    )
+    preview_path = output_dir / "map_preview.pcd"
+    write_pcd(preview_path, preview_centroids, preview_counts, args.pcd_format)
     map_summary = voxel_map.summary(local_planes)
+    pcd_record = _artifact_record(pcd_path)
+    preview_record = _artifact_record(preview_path)
     map_summary.update(
         {
             "topic": CLOUD_TOPIC,
+            "frame_id": cloud_frames.frame_id,
             "pointcloud_parse_error_count": pointcloud_parse_error_count,
             "pcd_path": pcd_path.name,
+            "pcd_sha256": pcd_record["sha256"],
+            "pcd_size_bytes": pcd_record["size_bytes"],
             "pcd_data_format": args.pcd_format,
             "pcd_fields": ["x", "y", "z", "count"],
+            "voxel_chunk_points": args.voxel_chunk_points,
+            "preview": {
+                **preview_record,
+                "point_count": int(preview_centroids.shape[0]),
+                "maximum_point_count": args.preview_max_points,
+                "selection": (
+                    "stable evenly spaced indexes over sorted voxel centroids"
+                ),
+            },
         }
     )
 
@@ -749,6 +900,33 @@ def analyze_bag(args: argparse.Namespace) -> int:
         )
         for topic, samples in trajectories.items()
     }
+    analysis_parameters = {
+        "storage_id": args.storage_id,
+        "diagnostics_topics": sorted(selected_diagnostic_topics),
+        "voxel_size_m": args.voxel_size,
+        "voxel_chunk_points": args.voxel_chunk_points,
+        "plane_radius_m": args.plane_radius,
+        "plane_minimum_points": args.plane_min_points,
+        "plane_maximum_samples": args.plane_max_samples,
+        "plane_random_seed": args.plane_random_seed,
+        "pcd_data_format": args.pcd_format,
+        "preview_max_points": args.preview_max_points,
+        "trajectory_gap_s": args.gap_threshold,
+        "translation_jump_m": args.translation_jump_threshold,
+        "orientation_jump_deg": args.orientation_jump_threshold_deg,
+    }
+    metadata_path = bag_path / "metadata.yaml"
+    metadata_record = (
+        _artifact_record(metadata_path) if metadata_path.is_file() else None
+    )
+    artifact_hashes = {
+        trajectory_record["path"]: trajectory_record["sha256"],
+        pcd_record["path"]: pcd_record["sha256"],
+        preview_record["path"]: preview_record["sha256"],
+    }
+    for artifact in trajectory_artifacts.values():
+        artifact_hashes[artifact["path"]] = artifact["sha256"]
+
     summary = {
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -757,6 +935,16 @@ def analyze_bag(args: argparse.Namespace) -> int:
         "source_bag": str(bag_path),
         "primary_trajectory_topic": primary_topic,
         "trajectory_csv": trajectory_path.name,
+        "trajectory_csv_sha256": trajectory_record["sha256"],
+        "trajectory_csv_size_bytes": trajectory_record["size_bytes"],
+        "trajectory_csvs": {
+            topic: artifact["path"]
+            for topic, artifact in trajectory_artifacts.items()
+        },
+        "trajectory_artifacts": trajectory_artifacts,
+        "artifact_hashes": dict(sorted(artifact_hashes.items())),
+        "analysis_parameters": analysis_parameters,
+        "analysis_parameters_sha256": _canonical_json_sha256(analysis_parameters),
         "trajectory": trajectory_summaries[primary_topic],
         "trajectories": trajectory_summaries,
         "map": map_summary,
@@ -770,6 +958,12 @@ def analyze_bag(args: argparse.Namespace) -> int:
             "selected_message_count": selected_message_count,
             "topic_message_counts": dict(sorted(topic_message_counts.items())),
             "available_topic_types": dict(sorted(topic_types.items())),
+            "metadata_path": (
+                metadata_record["path"] if metadata_record is not None else None
+            ),
+            "metadata_sha256": (
+                metadata_record["sha256"] if metadata_record is not None else None
+            ),
         },
         "thresholds": {
             "trajectory_gap_s": args.gap_threshold,
@@ -781,6 +975,7 @@ def analyze_bag(args: argparse.Namespace) -> int:
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"wrote {trajectory_path}")
     print(f"wrote {pcd_path}")
+    print(f"wrote {preview_path}")
     print(f"wrote {summary_path}")
     return 0
 
@@ -868,6 +1063,41 @@ def _required_nested(data: Mapping[str, Any], path: str) -> Any:
     return current
 
 
+def _comparison_invariant_value(
+    summary: Mapping[str, Any],
+    *,
+    run_label: str,
+    canonical_path: str,
+    accepted_paths: Sequence[str],
+) -> Any:
+    """Resolve one required invariant across additive summary schema variants."""
+    found: dict[str, Any] = {}
+    for path in accepted_paths:
+        current: Any = summary
+        for key in path.split("."):
+            if not isinstance(current, Mapping) or key not in current:
+                break
+            current = current[key]
+        else:
+            if current is not None:
+                found[path] = current
+
+    invariant_name = f"summary.{canonical_path}"
+    if not found:
+        accepted = ", ".join(f"'{path}'" for path in accepted_paths)
+        raise ValueError(
+            f"run '{run_label}' is missing comparison invariant "
+            f"'{invariant_name}'; expected one of: {accepted}"
+        )
+    first_value = next(iter(found.values()))
+    if any(value != first_value for value in found.values()):
+        raise ValueError(
+            f"run '{run_label}' has conflicting fields for comparison invariant "
+            f"'{invariant_name}': {found}"
+        )
+    return first_value
+
+
 def _validate_comparison_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     if len(runs) < 2:
         raise ValueError("compare mode requires at least two runs")
@@ -917,6 +1147,41 @@ def _validate_comparison_runs(runs: Sequence[Mapping[str, Any]]) -> dict[str, An
                     f"comparison invariant '{namespace}.{path}' differs: {labelled}"
                 )
             validated[f"{namespace}.{path}"] = values[0]
+    additive_summary_invariants = {
+        "map.voxel_chunk_points": (
+            "map.voxel_chunk_points",
+            "analysis_parameters.voxel_chunk_points",
+        ),
+        "map.local_planes.maximum_sample_count": (
+            "map.local_planes.maximum_sample_count",
+            "analysis_parameters.plane_maximum_samples",
+        ),
+        "map.local_planes.random_seed": (
+            "map.local_planes.random_seed",
+            "analysis_parameters.plane_random_seed",
+        ),
+        "map.preview.maximum_point_count": (
+            "map.preview.maximum_point_count",
+            "analysis_parameters.preview_max_points",
+        ),
+    }
+    for canonical_path, accepted_paths in additive_summary_invariants.items():
+        values = [
+            _comparison_invariant_value(
+                run["summary"],
+                run_label=run["label"],
+                canonical_path=canonical_path,
+                accepted_paths=accepted_paths,
+            )
+            for run in runs
+        ]
+        if any(value != values[0] for value in values[1:]):
+            labelled = {run["label"]: value for run, value in zip(runs, values)}
+            raise ValueError(
+                f"comparison invariant 'summary.{canonical_path}' differs: {labelled}"
+            )
+        validated[f"summary.{canonical_path}"] = values[0]
+
     return validated
 
 
@@ -1077,7 +1342,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     analyze.add_argument("--plane-min-points", type=int, default=30)
     analyze.add_argument("--plane-max-samples", type=int, default=5_000)
+    analyze.add_argument(
+        "--plane-random-seed", type=int, default=7, help="deterministic plane sample seed"
+    )
     analyze.add_argument("--pcd-format", choices=("ascii", "binary"), default="binary")
+    analyze.add_argument(
+        "--preview-max-points", type=int, default=500_000, help="map preview point cap"
+    )
     analyze.add_argument("--gap-threshold", type=float, default=0.20, help="odometry gap in s")
     analyze.add_argument(
         "--translation-jump-threshold", type=float, default=1.0, help="step jump in m"
