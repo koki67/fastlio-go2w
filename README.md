@@ -162,6 +162,24 @@ For replaying a saved bag:
 bash scripts/fastlio/replay.sh bags/raw_YYYYMMDD_HHMMSS
 ```
 
+For the Issue #7 offline odometry comparison, run the same bag once with each
+profile. Each command starts FAST-LIO, RViz, and bag playback together:
+
+```bash
+BAG=/mnt/go2w-experiment-recorder/bags/experiment_long3_20260714_014823
+bash scripts/fastlio/replay.sh "$BAG" --profile baseline
+bash scripts/fastlio/replay.sh "$BAG" --profile fused-high
+bash scripts/fastlio/replay.sh "$BAG" --profile fused-matched
+```
+
+`baseline` uses only the MID-360 input. `fused-high` adds a high-density Pandar
+XT16 sample to the MID-360 cloud and has the highest point count.
+`fused-matched` uses stronger input downsampling; it is the density-matched
+profile used by the controlled experiment documented below. The interactive
+replay profiles select their visualization configs automatically, so
+`--config` is not needed for this visual comparison. Stop each run with Ctrl-C
+before starting the next one.
+
 The devcontainer mounts the following external bag directories as read-only:
 
 - `/mnt/data1/experimental_data/go2w-experiment-recorder/bags` at
@@ -180,7 +198,11 @@ After pulling this configuration change, use **Dev Containers: Rebuild and
 Reopen in Container** once to apply the new mount.
 
 To replay with a specific FAST-LIO parameter YAML, pass `--config`.
-Without `--config`, replay uses `mid360_go2w.yaml`.
+Without `--config`, each profile selects the following default:
+
+- `legacy`: `mid360_go2w.yaml`
+- `baseline`: `mid360_go2w_accuracy_dense_false.yaml`
+- `fused-high` / `fused-matched`: `mid360_xt16_fused_accuracy_dense_false.yaml`
 
 ```bash
 bash scripts/fastlio/replay.sh bags/raw_YYYYMMDD_HHMMSS --config mid360_go2w_accuracy.yaml
@@ -191,7 +213,18 @@ bash scripts/fastlio/replay.sh bags/raw_YYYYMMDD_HHMMSS --config humble_ws/src/f
 or repository root, or a file name under
 `humble_ws/src/fastlio_go2w_bringup/config/`.
 
-RViz is enabled by default for replay. Add `--no-rviz` if you need headless replay.
+The option is a complete FAST-LIO parameter override; it does not select the
+RViz layout. For a fused profile, start from
+`mid360_xt16_fused_accuracy_dense_false.yaml` so that `common.lid_topic`
+remains `/livox/lidar_fused` and `preprocess.scan_line`
+remains `20`. The MID-360 visualization configs subscribe to `/livox/lidar`
+and therefore intentionally run MID-360-only processing even if a fused
+profile starts the fusion node.
+
+RViz is enabled by default for replay. Add `--no-rviz` if you need headless
+replay. All replay defaults set `publish.map_en: true`, and the bundled RViz
+layout enables `/Laser_map`, so the accumulated lower-density FAST-LIO map is
+visible in the same way as on the main branch.
 
 ## Attribution
 
