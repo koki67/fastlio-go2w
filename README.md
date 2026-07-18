@@ -176,9 +176,49 @@ bash scripts/fastlio/replay.sh "$BAG" --profile fused-matched
 XT16 sample to the MID-360 cloud and has the highest point count.
 `fused-matched` uses stronger input downsampling; it is the density-matched
 profile used by the controlled experiment documented below. The interactive
-replay profiles select their visualization configs automatically, so
+replay profiles automatically select visualization-enabled FAST-LIO YAMLs, so
 `--config` is not needed for this visual comparison. Stop each run with Ctrl-C
 before starting the next one.
+
+For repeatable measurements and final artifacts, use the headless experiment
+runner instead of interactive replay:
+
+```bash
+BAG=/mnt/go2w-experiment-recorder/bags/experiment_long3_20260714_014823
+OUT=results/multilidar/long3/baseline-accuracy
+
+bash scripts/offline/run_multilidar_experiment.sh \
+  "$BAG" --profile baseline --rate 1.0 --output "$OUT"
+
+bash scripts/offline/visualize_multilidar_run.sh "$OUT"
+```
+
+The runner starts playback paused, verifies every endpoint and the live
+FAST-LIO input/output parameters, records `/odom`, `/Odometry`, and every
+`/cloud_registered` frame, then stops all measured processes before producing:
+
+- `map_voxelized.pcd`: final accumulated registered-scan map
+- `map_preview.pcd`: bounded-size RViz preview of the same map
+- `trajectory.csv` and `trajectory_camera_init.csv`: frozen trajectories
+- `summary.json`, resource metrics, provenance, logs, and the result bag
+
+The headless configs retain the accuracy tuning while disabling live
+`/Laser_map`, cumulative `/path`, and the unused body-frame cloud. Use
+`--config` for an explicit compatible YAML or `--no-analyze` to keep only the
+recorded result. The runner rejects configs that re-enable cumulative outputs.
+
+The visualizer publishes the frozen map and trajectory and opens RViz without
+rerunning FAST-LIO. To inspect the time sequence, replay only the saved result
+topics:
+
+```bash
+bash scripts/offline/visualize_multilidar_run.sh "$OUT" --dynamic --rate 2.0
+```
+
+Dynamic mode replays `/cloud_registered` and `/Odometry`; its GUI load cannot
+change the already-computed odometry. See the
+[offline result artifact workflow](docs/offline-result-artifacts.md) for the
+complete procedure and interpretation.
 
 The devcontainer mounts the following external bag directories as read-only:
 
