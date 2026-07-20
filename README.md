@@ -18,6 +18,7 @@ The repository mirrors the proven `dlio-go2w` structure, replacing the sensing a
 - [Host vs container](#host-vs-container)
 - [Robot-side workflow](#robot-side-workflow)
 - [Desktop workflow](#desktop-workflow)
+- [Headless offline processing and saved results](#headless-offline-processing-and-saved-results)
 - [Attribution](#attribution)
 
 ## Repository layout
@@ -42,9 +43,12 @@ fastlio-go2w/
 │   ├── build_ws.sh
 │   ├── diagnostics/
 │   │   └── check_tf.sh
-│   └── fastlio/
-│       ├── replay.sh
-│       ├── live_rviz.sh
+│   ├── fastlio/
+│   │   ├── replay.sh
+│   │   └── live_rviz.sh
+│   └── offline/
+│       ├── run_multilidar_experiment.sh
+│       └── visualize_multilidar_run.sh
 └── catmux/
     ├── fastlio.yaml
     └── record_raw.yaml
@@ -180,46 +184,6 @@ replay profiles automatically select visualization-enabled FAST-LIO YAMLs, so
 `--config` is not needed for this visual comparison. Stop each run with Ctrl-C
 before starting the next one.
 
-For repeatable measurements and final artifacts, use the headless experiment
-runner instead of interactive replay:
-
-```bash
-BAG=/mnt/go2w-experiment-recorder/bags/experiment_long3_20260714_014823
-OUT=results/multilidar/long3/baseline-accuracy
-
-bash scripts/offline/run_multilidar_experiment.sh \
-  "$BAG" --profile baseline --rate 1.0 --output "$OUT"
-
-bash scripts/offline/visualize_multilidar_run.sh "$OUT"
-```
-
-The runner starts playback paused, verifies every endpoint and the live
-FAST-LIO input/output parameters, records `/odom`, `/Odometry`, and every
-`/cloud_registered` frame, then stops all measured processes before producing:
-
-- `map_voxelized.pcd`: final accumulated registered-scan map
-- `map_preview.pcd`: bounded-size RViz preview of the same map
-- `trajectory.csv` and `trajectory_camera_init.csv`: frozen trajectories
-- `summary.json`, resource metrics, provenance, logs, and the result bag
-
-The headless configs retain the accuracy tuning while disabling live
-`/Laser_map`, cumulative `/path`, and the unused body-frame cloud. Use
-`--config` for an explicit compatible YAML or `--no-analyze` to keep only the
-recorded result. The runner rejects configs that re-enable cumulative outputs.
-
-The visualizer publishes the frozen map and trajectory and opens RViz without
-rerunning FAST-LIO. To inspect the time sequence, replay only the saved result
-topics:
-
-```bash
-bash scripts/offline/visualize_multilidar_run.sh "$OUT" --dynamic --rate 2.0
-```
-
-Dynamic mode replays `/cloud_registered` and `/Odometry`; its GUI load cannot
-change the already-computed odometry. See the
-[offline result artifact workflow](docs/offline-result-artifacts.md) for the
-complete procedure and interpretation.
-
 The devcontainer mounts the following external bag directories as read-only:
 
 - `/mnt/data1/experimental_data/go2w-experiment-recorder/bags` at
@@ -265,6 +229,70 @@ RViz is enabled by default for replay. Add `--no-rviz` if you need headless
 replay. All replay defaults set `publish.map_en: true`, and the bundled RViz
 layout enables `/Laser_map`, so the accumulated lower-density FAST-LIO map is
 visible in the same way as on the main branch.
+
+## Headless offline processing and saved results
+
+The offline workflow separates computation from visualization. During the
+bounded playback of an existing sensor bag, the runner starts FAST-LIO without
+RViz, records the computed outputs, and exits after the bag and processing
+queue finish. It then generates final map and trajectory artifacts. A separate
+command can visualize those frozen artifacts later without rerunning FAST-LIO
+or changing the saved odometry.
+
+All three experiment profiles support this workflow:
+
+| Profile | Processing input |
+|---|---|
+| `baseline` | MID-360 only |
+| `fused-high` | MID-360 + Pandar XT16, higher retained density |
+| `fused-matched` | MID-360 + Pandar XT16, density-matched sampling |
+
+Run the commands from the repository root in the ROS 2 Humble project
+container. This example creates a `fused-matched` result:
+
+```bash
+BAG=/mnt/go2w-experiment-recorder/bags/experiment_long3_20260714_014823
+OUT=results/multilidar/long3/fused-matched
+
+bash scripts/offline/run_multilidar_experiment.sh \
+  "$BAG" --profile fused-matched --rate 1.0 --output "$OUT"
+```
+
+The runner starts bag playback paused, verifies the ROS endpoints and live
+parameters, and records only the processing outputs needed for artifacts and
+diagnostics: `/odom`, `/Odometry`, `/cloud_registered`, and fusion diagnostics.
+The headless FAST-LIO configurations disable the live cumulative `/Laser_map`,
+`/path`, and unused body-frame cloud publishers. A successful analyzed run
+contains, among other provenance and diagnostic files:
+
+- `rosbag/`: the frozen output topics
+- `map_voxelized.pcd`: the final accumulated registered-scan map
+- `map_preview.pcd`: a bounded-size preview of that map for RViz
+- `trajectory.csv` and `trajectory_camera_init.csv`: frozen trajectories
+- `summary.json`: map, trajectory, resource, and artifact metadata
+
+The output directory must be empty. If `--output` is omitted, a timestamped
+directory is created below `results/multilidar/<bag-name>/`. Use `--no-analyze`
+only when the result bag should be saved without immediately generating the
+PCD maps and trajectory CSVs.
+
+To display the completed map and trajectory in RViz:
+
+```bash
+bash scripts/offline/visualize_multilidar_run.sh "$OUT"
+```
+
+Static mode publishes the saved preview map and trajectory. Dynamic mode also
+replays the already-computed `/cloud_registered` and `/Odometry` outputs:
+
+```bash
+bash scripts/offline/visualize_multilidar_run.sh "$OUT" --dynamic --rate 2.0
+```
+
+Neither visualization mode runs FAST-LIO or the fusion node. See the
+[offline result artifact workflow](docs/offline-result-artifacts.md) for the
+full profile comparison procedure, artifact definitions, validation, and
+troubleshooting.
 
 ## Attribution
 
