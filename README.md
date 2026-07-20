@@ -184,12 +184,15 @@ replay profiles automatically select visualization-enabled FAST-LIO YAMLs, so
 `--config` is not needed for this visual comparison. Stop each run with Ctrl-C
 before starting the next one.
 
-The devcontainer mounts the following external bag directories as read-only:
+The devcontainer mounts the external bag directories as read-only and the
+offline result directory as read-write:
 
 - `/mnt/data1/experimental_data/go2w-experiment-recorder/bags` at
   `/mnt/go2w-experiment-recorder/bags`
 - `/mnt/data1/experimental_data/fastlio-go2w/bags` at
   `/mnt/fastlio-go2w/bags`
+- `/mnt/data1/experimental_data/fastlio-go2w/results` at
+  `/mnt/fastlio-go2w/results`
 
 This lets you replay a bag stored outside this repository without copying it:
 
@@ -252,7 +255,8 @@ container. This example creates a `fused-matched` result:
 
 ```bash
 BAG=/mnt/go2w-experiment-recorder/bags/experiment_long3_20260714_014823
-OUT=results/multilidar/long3/fused-matched
+RESULTS_ROOT="${FASTLIO_RESULTS_ROOT:-$PWD/results}"
+OUT="$RESULTS_ROOT/multilidar/long3/fused-matched"
 
 bash scripts/offline/run_multilidar_experiment.sh \
   "$BAG" --profile fused-matched --rate 1.0 --output "$OUT"
@@ -271,8 +275,12 @@ contains, among other provenance and diagnostic files:
 - `trajectory.csv` and `trajectory_camera_init.csv`: frozen trajectories
 - `summary.json`: map, trajectory, resource, and artifact metadata
 
-The output directory must be empty. If `--output` is omitted, a timestamped
-directory is created below `results/multilidar/<bag-name>/`. Use `--no-analyze`
+The devcontainer sets `FASTLIO_RESULTS_ROOT=/mnt/fastlio-go2w/results`, which
+is backed by the host data disk. `docker/run.sh` uses the same external
+directory when it exists and otherwise falls back to the repository's mounted
+`results/` directory. Outside these containers, the runner defaults to
+`<repository>/results`. If `--output` is omitted, it creates a timestamped
+directory below `$FASTLIO_RESULTS_ROOT/multilidar/<bag-name>/`. Use `--no-analyze`
 only when the result bag should be saved without immediately generating the
 PCD maps and trajectory CSVs.
 

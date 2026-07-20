@@ -66,8 +66,14 @@ bash scripts/offline/run_multilidar_experiment.sh \
 
 Run the profiles sequentially. Parallel runs compete for CPU, memory, and disk
 bandwidth and therefore do not provide a fair resource or stability comparison.
-The output directory must be empty. If `--output` is omitted, the runner creates
-a timestamped directory below `results/multilidar/<bag-name>/`.
+The output directory must be empty. The devcontainer sets
+`FASTLIO_RESULTS_ROOT=/mnt/fastlio-go2w/results`, backed by
+`/mnt/data1/experimental_data/fastlio-go2w/results` on the host.
+`docker/run.sh` uses that host directory when it exists and falls back to
+`/external/results`; outside these containers, the default is
+`<repository>/results`. If `--output` is omitted, the runner creates a
+timestamped directory below
+`$FASTLIO_RESULTS_ROOT/multilidar/<bag-name>/`.
 
 `fused-high` remains available for the higher-density experiment:
 

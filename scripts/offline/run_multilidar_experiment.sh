@@ -21,7 +21,7 @@ Options:
   --duration SEC      Approximate bag seconds via wall timer (smoke tests only)
   --rate RATE         Rosbag playback multiplier (default: 1.0)
   --domain-id ID      Isolated ROS domain ID (default: 77)
-  --output DIR        Result directory (default: results/multilidar/...)
+  --output DIR        Result directory (default: ${FASTLIO_RESULTS_ROOT}/multilidar/<bag>/...)
   --config YAML       Override tuning while preserving the profile input and
                       headless output contract
   --debug-cloud       Publish and record /livox/lidar_fused_debug
@@ -57,6 +57,7 @@ ANALYZE="true"
 MAP_VOXEL_SIZE="0.20"
 PREVIEW_MAX_POINTS="500000"
 PLANE_RANDOM_SEED="7"
+FASTLIO_RESULTS_ROOT="${FASTLIO_RESULTS_ROOT:-$REPO_ROOT/results}"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -179,7 +180,7 @@ fi
 if [ -z "$OUTPUT_DIR" ]; then
     BAG_NAME="$(basename "$BAG")"
     RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-    OUTPUT_DIR="$REPO_ROOT/results/multilidar/$BAG_NAME/${RUN_STAMP}-${PROFILE}"
+    OUTPUT_DIR="$(realpath -m "${FASTLIO_RESULTS_ROOT}/multilidar/$BAG_NAME/${RUN_STAMP}-${PROFILE}")"
 else
     OUTPUT_DIR="$(realpath -m "$OUTPUT_DIR")"
 fi
