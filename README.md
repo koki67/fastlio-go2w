@@ -18,6 +18,7 @@ The repository mirrors the proven `dlio-go2w` structure, replacing the sensing a
 - [Host vs container](#host-vs-container)
 - [Robot-side workflow](#robot-side-workflow)
 - [Desktop workflow](#desktop-workflow)
+- [Headless offline processing and saved results](#headless-offline-processing-and-saved-results)
 - [Attribution](#attribution)
 
 ## Repository layout
@@ -42,9 +43,12 @@ fastlio-go2w/
 │   ├── build_ws.sh
 │   ├── diagnostics/
 │   │   └── check_tf.sh
-│   └── fastlio/
-│       ├── replay.sh
-│       ├── live_rviz.sh
+│   ├── fastlio/
+│   │   ├── replay.sh
+│   │   └── live_rviz.sh
+│   └── offline/
+│       ├── run_fastlio_offline.sh
+│       └── visualize_fastlio_run.sh
 └── catmux/
     ├── fastlio.yaml
     └── record_raw.yaml
@@ -162,12 +166,15 @@ For replaying a saved bag:
 bash scripts/fastlio/replay.sh bags/raw_YYYYMMDD_HHMMSS
 ```
 
-The devcontainer mounts the following external bag directories as read-only:
+The devcontainer mounts the external bag directories as read-only and the
+offline result directory as read-write:
 
 - `/mnt/data1/experimental_data/go2w-experiment-recorder/bags` at
   `/mnt/go2w-experiment-recorder/bags`
 - `/mnt/data1/experimental_data/fastlio-go2w/bags` at
   `/mnt/fastlio-go2w/bags`
+- `/mnt/data1/experimental_data/fastlio-go2w/results` at
+  `/mnt/fastlio-go2w/results`
 
 This lets you replay a bag stored outside this repository without copying it:
 
@@ -192,6 +199,65 @@ or repository root, or a file name under
 `humble_ws/src/fastlio_go2w_bringup/config/`.
 
 RViz is enabled by default for replay. Add `--no-rviz` if you need headless replay.
+
+## Headless offline processing and saved results
+
+The offline workflow separates FAST-LIO computation from visualization. It
+plays an existing MID-360 bag once, runs FAST-LIO without a GUI, records only
+the registered clouds and odometry needed for final artifacts, and exits after
+the bag and processing queue finish. The saved map and trajectory can be
+visualized later without rerunning FAST-LIO.
+
+Rebuild the workspace after pulling this feature. Then run the following from
+the repository root in the ROS 2 Humble project container:
+
+```bash
+BAG=/mnt/go2w-experiment-recorder/bags/experiment_long3_20260714_014823
+RESULTS_ROOT="${FASTLIO_RESULTS_ROOT:-$PWD/results}"
+OUT="$RESULTS_ROOT/fastlio/long3/baseline"
+
+bash scripts/offline/run_fastlio_offline.sh \
+  "$BAG" --rate 1.0 --output "$OUT"
+```
+
+The runner reads only `/livox/lidar` and `/livox/imu`. It starts playback
+paused, verifies all processing and recording endpoints, validates the live
+FAST-LIO parameters, and then resumes the bag. The headless configuration
+retains the accuracy tuning while disabling cumulative `/Laser_map`, `/path`,
+the unused body-frame cloud, and FAST-LIO's built-in PCD writer.
+
+A successful analyzed run contains:
+
+- `rosbag/`: frozen `/odom`, `/Odometry`, and `/cloud_registered`
+- `map_voxelized.pcd`: final accumulated registered-scan map
+- `map_preview.pcd`: bounded-size RViz preview
+- `trajectory.csv` and `trajectory_camera_init.csv`: frozen trajectories
+- `summary.json`: map, trajectory, resource, and artifact metadata
+- configuration snapshots, hashes, process metrics, and logs
+
+The devcontainer sets
+`FASTLIO_RESULTS_ROOT=/mnt/fastlio-go2w/results`, backed by the host data
+disk. `docker/run.sh` uses the same external directory when it exists and
+otherwise falls back to the repository's mounted `results/` directory.
+Outside these containers, the default is `<repository>/results`. The output
+directory must be empty.
+
+Display the completed map and trajectory in RViz:
+
+```bash
+bash scripts/offline/visualize_fastlio_run.sh "$OUT"
+```
+
+Static mode publishes the frozen preview map and trajectory. Dynamic mode also
+replays the already-computed `/cloud_registered` and `/Odometry`:
+
+```bash
+bash scripts/offline/visualize_fastlio_run.sh "$OUT" --dynamic --rate 2.0
+```
+
+Neither visualization mode runs FAST-LIO. See the
+[offline result artifact workflow](docs/offline-result-artifacts.md) for
+artifact definitions, validation, comparison, and troubleshooting.
 
 ## Attribution
 
