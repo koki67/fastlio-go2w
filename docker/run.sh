@@ -37,6 +37,15 @@ Environment:
   FASTLIO_GO2W_REMOTE_IFACE    Remote visualization interface, default wlan0.
   FASTLIO_GO2W_ROBOT_IFACE     Robot/internal DDS interface, default eth0.
   FASTLIO_GO2W_HOST_USER       Set true to enable --host-user behavior.
+  FASTLIO_RESULTS_ROOT          Default offline output root inside the container.
+                               Defaults to FASTLIO_RESULTS_CONTAINER_DIR when
+                               its host directory exists, else /external/results.
+  FASTLIO_RESULTS_HOST_DIR      Absolute host path to shared experiment outputs
+                               (default:
+                               /mnt/data1/experimental_data/fastlio-go2w/results).
+  FASTLIO_RESULTS_CONTAINER_DIR
+                               Absolute container path for mounted outputs
+                               (default: /mnt/fastlio-go2w/results).
   ROS_DOMAIN_ID                Forwarded into the container, default 0.
   CYCLONEDDS_URI               If set, used verbatim and generated DDS profiles
                                are skipped.
@@ -133,7 +142,17 @@ else
     CMD=(bash)
 fi
 
-CONTAINER_BOOTSTRAP='source /opt/ros/humble/setup.bash; if [ -f /external/humble_ws/install/setup.bash ]; then source /external/humble_ws/install/setup.bash; fi; exec "$@"'
+FASTLIO_RESULTS_HOST_DIR="${FASTLIO_RESULTS_HOST_DIR:-/mnt/data1/experimental_data/fastlio-go2w/results}"
+FASTLIO_RESULTS_CONTAINER_DIR="${FASTLIO_RESULTS_CONTAINER_DIR:-/mnt/fastlio-go2w/results}"
+FASTLIO_RESULTS_ROOT_CONTAINER="/external/results"
+RESULTS_VOLUME_OPTS=()
+if [ -d "$FASTLIO_RESULTS_HOST_DIR" ]; then
+    RESULTS_VOLUME_OPTS+=(--volume="$FASTLIO_RESULTS_HOST_DIR:$FASTLIO_RESULTS_CONTAINER_DIR:rw")
+    FASTLIO_RESULTS_ROOT_CONTAINER="$FASTLIO_RESULTS_CONTAINER_DIR"
+fi
+FASTLIO_RESULTS_ROOT="${FASTLIO_RESULTS_ROOT:-$FASTLIO_RESULTS_ROOT_CONTAINER}"
+
+CONTAINER_BOOTSTRAP='source /opt/ros/humble/setup.bash; mkdir -p "$FASTLIO_RESULTS_ROOT"; if [ -f /external/humble_ws/install/setup.bash ]; then source /external/humble_ws/install/setup.bash; fi; exec "$@"'
 
 USER_ARGS=()
 if [ "$HOST_USER" = "true" ]; then
@@ -148,11 +167,13 @@ docker run -it --rm \
   --env="QT_X11_NO_MITSHM=1" \
   --env="RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" \
   --env="CYCLONEDDS_URI=$DDS_URI" \
+  --env="FASTLIO_RESULTS_ROOT=$FASTLIO_RESULTS_ROOT" \
   --env="ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}" \
   --env="XAUTHORITY=$XAUTH" \
   --volume="/tmp/.X11-unix:/tmp/.X11-unix:rw" \
   --volume="$XAUTH:$XAUTH" \
   --volume="$REPO_ROOT:/external:rw" \
+  "${RESULTS_VOLUME_OPTS[@]}" \
   "${USER_ARGS[@]}" \
   "$IMAGE" \
   bash -lc "$CONTAINER_BOOTSTRAP" \
