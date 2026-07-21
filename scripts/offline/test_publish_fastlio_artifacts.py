@@ -241,6 +241,37 @@ def test_load_bundle_rejects_map_trajectory_frame_mismatch(tmp_path):
         load_artifact_bundle(tmp_path)
 
 
+def test_load_bundle_allows_base_aligned_odom_trajectory(tmp_path):
+    map_path = tmp_path / "map_voxelized.pcd"
+    trajectory_path = tmp_path / "trajectory.csv"
+    _write_ascii_pcd(map_path, [(0.0, 0.0, 0.0, 1)])
+    _write_trajectory(
+        trajectory_path, frame_id="odom", child_frame_id="base_link"
+    )
+    summary = {
+        "map": {"frame_id": "camera_init", "pcd_path": map_path.name},
+        "trajectory_artifacts": {
+            "/odom": {
+                "path": trajectory_path.name,
+                "frame_id": "odom",
+                "child_frame_id": "base_link",
+                "sha256": sha256_file(trajectory_path),
+            }
+        },
+    }
+    (tmp_path / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+
+    bundle = load_artifact_bundle(
+        tmp_path,
+        trajectory_topic="/odom",
+        require_matching_frames=False,
+    )
+
+    assert bundle.map_frame_id == "camera_init"
+    assert bundle.trajectory.frame_id == "odom"
+    assert bundle.trajectory.child_frame_id == "base_link"
+
+
 def test_print_frame_id_outputs_only_normalized_validated_frame(tmp_path, capsys):
     map_path = tmp_path / "map_preview.pcd"
     trajectory_path = tmp_path / "trajectory_camera_init.csv"

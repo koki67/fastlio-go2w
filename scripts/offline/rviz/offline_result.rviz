@@ -20,13 +20,13 @@ Visualization Manager:
       Channel Name: count
       Class: rviz_default_plugins/PointCloud2
       Color: 235; 235; 235
-      Color Transformer: AxisColor
-      Decay Time: 0
+      Color Transformer: FlatColor
+      Decay Time: 1000000
       Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Min Color: 35; 35; 35
-      Name: Final registered-scan map
+      Name: Registered-scan map
       Position Transformer: XYZ
       Selectable: true
       Size (Pixels): 2
@@ -36,11 +36,11 @@ Visualization Manager:
         Depth: 1
         Durability Policy: Transient Local
         Filter size: 10
-        History Policy: Keep Last
+        History Policy: Keep All
         Reliability Policy: Reliable
         Value: /offline/map
       Use Fixed Frame: true
-      Use rainbow: true
+      Use rainbow: false
       Value: true
     - Alpha: 1
       Buffer Length: 1
@@ -52,7 +52,7 @@ Visualization Manager:
       Length: 0.3
       Line Style: Lines
       Line Width: 0.05
-      Name: Final trajectory
+      Name: Trajectory
       Offset:
         X: 0
         Y: 0
@@ -80,13 +80,13 @@ Visualization Manager:
       Channel Name: intensity
       Class: rviz_default_plugins/PointCloud2
       Color: 255; 170; 0
-      Color Transformer: AxisColor
+      Color Transformer: FlatColor
       Decay Time: 0
       Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Min Color: 0; 0; 0
-      Name: Dynamic registered scan
+      Name: Current registered scan
       Position Transformer: XYZ
       Selectable: true
       Size (Pixels): 2
@@ -100,7 +100,7 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /cloud_registered
       Use Fixed Frame: true
-      Use rainbow: true
+      Use rainbow: false
       Value: true
     - Alpha: 1
       Class: rviz_default_plugins/Odometry
@@ -111,7 +111,7 @@ Visualization Manager:
           Alpha: 0
       Enabled: true
       Keep: 1
-      Name: Dynamic FAST-LIO pose
+      Name: Dynamic robot base pose
       Position Tolerance: 0.1
       Shape:
         Axes Length: 0.5
@@ -128,7 +128,7 @@ Visualization Manager:
         Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /Odometry
+        Value: /odom
       Value: true
     - Alpha: 0.35
       Cell Size: 1
@@ -151,7 +151,7 @@ Visualization Manager:
   Enabled: true
   Global Options:
     Background Color: 0; 0; 0
-    Fixed Frame: camera_init
+    Fixed Frame: odom
     Frame Rate: 30
   Name: root
   Tools:

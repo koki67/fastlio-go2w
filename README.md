@@ -48,6 +48,8 @@ fastlio-go2w/
 │   │   └── live_rviz.sh
 │   └── offline/
 │       ├── run_fastlio_offline.sh
+│       ├── publish_offline_frame_alignment.py
+│       ├── replay_fastlio_artifacts.py
 │       └── visualize_fastlio_run.sh
 └── catmux/
     ├── fastlio.yaml
@@ -248,14 +250,21 @@ Display the completed map and trajectory in RViz:
 bash scripts/offline/visualize_fastlio_run.sh "$OUT"
 ```
 
-Static mode publishes the frozen preview map and trajectory. Dynamic mode also
-replays the already-computed `/cloud_registered` and `/Odometry`:
+Static mode publishes the frozen preview map and trajectory. Dynamic mode
+starts with an empty map and path, replays the already-computed
+`/cloud_registered` and `/odom`, and incrementally adds new 0.2 m map
+voxels and trajectory poses:
 
 ```bash
 bash scripts/offline/visualize_fastlio_run.sh "$OUT" --dynamic --rate 2.0
 ```
 
-Neither visualization mode runs FAST-LIO. See the
+The current registered scan remains visible separately while the accumulated
+map and traveled path grow. Dynamic replay does not publish the completed PCD
+or trajectory CSV up front. Both modes reconstruct the saved `odom ->
+camera_init` display transform from the MID-360 calibration, so the RViz Grid
+is parallel to the initial robot `base_link` XY plane. Neither visualization
+mode runs FAST-LIO. See the
 [offline result artifact workflow](docs/offline-result-artifacts.md) for
 artifact definitions, validation, comparison, and troubleshooting.
 

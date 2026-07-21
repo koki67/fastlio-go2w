@@ -26,7 +26,7 @@ run directory
         |
         | scripts/offline/visualize_fastlio_run.sh
         v
-  static final-map view or dynamic replay of already-computed output
+  static final-map view or growing replay of already-computed output
 ~~~
 
 The runner starts source-bag playback paused, waits for all processing and
@@ -139,15 +139,16 @@ Analysis is enabled by default. A successful run contains at least:
 | resource_metrics.csv | Per-process CPU-time and RSS samples |
 | resource_summary.json | Resource-sampling summary |
 | trajectory.csv | Primary trajectory; /odom is preferred |
-| trajectory_camera_init.csv | Raw FAST-LIO /Odometry trajectory used by the viewer |
+| trajectory_camera_init.csv | Raw FAST-LIO /Odometry trajectory retained for analysis and debugging |
 | map_voxelized.pcd | Voxelized accumulation of all finite registered points |
 | map_preview.pcd | Deterministic bounded-size map used by RViz |
 | summary.json | Trajectory, map, resource, provenance, and artifact hashes |
 | analysis.log | Analyzer output or error details |
 
 The analyzer preserves the frame IDs found in the recorded data. It rejects
-mixed nonempty cloud frames. The viewer uses the /Odometry trajectory, verifies
-that its frame matches the map frame, and passes that validated frame to RViz.
+mixed nonempty cloud frames. The viewer uses the `/odom` trajectory for the
+robot path and reconstructs the calibrated `odom -> camera_init` transform for
+the registered clouds. RViz therefore uses `odom` as its fixed frame.
 
 map_voxelized.pcd contains x, y, z, and count; count is the number of registered
 points accumulated into each voxel. Voxel keys are sorted before writing,
@@ -165,9 +166,13 @@ built and sourced. Use an unused ROS_DOMAIN_ID if another ROS graph is active.
 ROS_DOMAIN_ID=78 bash scripts/offline/visualize_fastlio_run.sh "$OUT"
 ~~~
 
-Static mode publishes map_preview.pcd as /offline/map and the matching-frame
-trajectory as /offline/path. It does not play a bag or run FAST-LIO. This is
-the preferred mode for final-map inspection and screenshots.
+Static mode publishes map_preview.pcd as /offline/map and the saved /odom
+trajectory as /offline/path. The viewer reconstructs the static
+odom -> camera_init transform from the canonical MID-360 calibration and uses
+odom as the RViz fixed frame. The Grid is therefore parallel to the initial
+robot base_link XY plane rather than the pitched sensor frame. It does not play
+a bag or run FAST-LIO. This is the preferred mode for final-map inspection and
+screenshots.
 
 ### Dynamic saved-result replay
 
@@ -176,9 +181,23 @@ ROS_DOMAIN_ID=78 bash scripts/offline/visualize_fastlio_run.sh \
   "$OUT" --dynamic --rate 1.0
 ~~~
 
-Dynamic mode keeps the frozen map and path visible and additionally replays
-only /cloud_registered and /Odometry from the result bag. The rate changes
-animation speed but cannot change the saved odometry.
+Dynamic mode does not publish the completed PCD or trajectory CSV. It begins
+with an empty map and path, replays only /cloud_registered and /odom from the
+result bag, publishes each newly occupied map voxel once, and republishes the
+base-aligned path as saved odometry poses arrive. RViz retains the incremental
+voxel batches, so the registered-scan map and traveled path grow in playback
+time while the current registered scan and robot base pose remain visible
+separately.
+
+The voxel edge is read from summary.json (0.20 m by default). This prevents
+RViz from retaining every repeated raw point: each voxel is displayed once,
+even though the result bag may contain tens of millions of registered points.
+The rate changes animation speed but cannot change the saved FAST-LIO output.
+No FAST-LIO process is started.
+
+Changing this display alignment does not require regenerating result artifacts.
+The result bag already contains /odom; the viewer supplies only the saved
+sensor-to-base static transform needed to display camera_init data in odom.
 
 To validate artifacts without starting ROS publishers or RViz:
 
@@ -232,11 +251,12 @@ map/trajectory frame compatibility.
 
 ### Dynamic mode has no animation
 
-Confirm that RUN_DIR/rosbag exists and contains /cloud_registered and
-/Odometry:
+Confirm that RUN_DIR/rosbag exists and contains /cloud_registered and /odom:
 
 ~~~bash
 ros2 bag info RUN_DIR/rosbag
 ~~~
 
 Static visualization only requires the analyzed PCD and trajectory artifacts.
+Dynamic visualization requires summary.json plus the saved result bag. It does
+not use the completed PCD or trajectory CSV as its initial display.

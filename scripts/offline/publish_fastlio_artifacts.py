@@ -346,7 +346,12 @@ def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-def load_artifact_bundle(run_dir: Path) -> ArtifactBundle:
+def load_artifact_bundle(
+    run_dir: Path,
+    *,
+    trajectory_topic: str = "/Odometry",
+    require_matching_frames: bool = True,
+) -> ArtifactBundle:
     run_dir = run_dir.expanduser().resolve()
     if not run_dir.is_dir():
         raise ArtifactError(f"run directory does not exist: {run_dir}")
@@ -391,28 +396,36 @@ def load_artifact_bundle(run_dir: Path) -> ArtifactBundle:
             )
 
     trajectory_artifacts = _mapping_or_empty(summary.get("trajectory_artifacts"))
-    raw_trajectory = _mapping_or_empty(trajectory_artifacts.get("/Odometry"))
+    raw_trajectory = _mapping_or_empty(trajectory_artifacts.get(trajectory_topic))
     if raw_trajectory:
         trajectory_path = _validated_path(
-            run_dir, raw_trajectory.get("path"), "/Odometry trajectory CSV"
+            run_dir,
+            raw_trajectory.get("path"),
+            f"{trajectory_topic} trajectory CSV",
         )
         trajectory_frame = _normalize_frame_id(raw_trajectory.get("frame_id"))
         trajectory_child = _normalize_frame_id(raw_trajectory.get("child_frame_id"))
         trajectory_hash = raw_trajectory.get("sha256")
     else:
+        if trajectory_topic != "/Odometry":
+            raise ArtifactError(
+                f"summary.json has no trajectory artifact for {trajectory_topic}"
+            )
         trajectory_path = _validated_path(
             run_dir, "trajectory_camera_init.csv", "camera_init trajectory CSV"
         )
         trajectory_frame = map_frame_id
         trajectory_child = ""
         trajectory_hash = ""
-    _validate_hash(trajectory_path, trajectory_hash, "/Odometry trajectory CSV")
+    _validate_hash(
+        trajectory_path, trajectory_hash, f"{trajectory_topic} trajectory CSV"
+    )
     trajectory = load_trajectory(
         trajectory_path,
         expected_frame_id=trajectory_frame,
         expected_child_frame_id=trajectory_child,
     )
-    if trajectory.frame_id != map_frame_id:
+    if require_matching_frames and trajectory.frame_id != map_frame_id:
         raise ArtifactError(
             "map and trajectory frames differ: "
             f"map={map_frame_id}, trajectory={trajectory.frame_id}"
@@ -524,8 +537,10 @@ def _publish_bundle(bundle: ArtifactBundle, map_topic: str, path_topic: str) -> 
             self._timer.cancel()
             self.get_logger().info(
                 f"Published {cloud.width} map points on {map_topic} and "
-                f"{len(path_message.poses)} poses on {path_topic} in "
-                f"frame {bundle.map_frame_id}; keeping transient-local data alive"
+                f"{len(path_message.poses)} poses on {path_topic}; "
+                f"map frame={bundle.map_frame_id}, "
+                f"path frame={bundle.trajectory.frame_id}; "
+                "keeping transient-local data alive"
             )
 
     rclpy.init(args=None)
@@ -546,6 +561,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("run_dir", type=Path, help="analyzed offline run directory")
     parser.add_argument("--map-topic", default="/offline/map")
     parser.add_argument("--path-topic", default="/offline/path")
+    parser.add_argument(
+        "--trajectory-topic",
+        choices=("/Odometry", "/odom"),
+        default="/Odometry",
+        help="saved trajectory to publish (default: /Odometry)",
+    )
     output_mode = parser.add_mutually_exclusive_group()
     output_mode.add_argument(
         "--validate-only",
@@ -563,7 +584,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        bundle = load_artifact_bundle(args.run_dir)
+        bundle = load_artifact_bundle(
+            args.run_dir,
+            trajectory_topic=args.trajectory_topic,
+            require_matching_frames=args.trajectory_topic == "/Odometry",
+        )
         if args.print_frame_id:
             print(bundle.map_frame_id)
             return 0
@@ -572,7 +597,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"map={bundle.map_path.name} ({bundle.pcd.xyz.shape[0]} points, "
             f"{bundle.pcd.data_format}), trajectory={bundle.trajectory_path.name} "
             f"({bundle.trajectory.positions.shape[0]} poses), "
-            f"frame={bundle.map_frame_id}"
+            f"map_frame={bundle.map_frame_id}, "
+            f"trajectory_frame={bundle.trajectory.frame_id}"
         )
         if args.validate_only:
             return 0
