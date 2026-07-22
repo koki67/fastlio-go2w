@@ -1,12 +1,13 @@
 # Offline FAST-LIO result artifacts and visualization
 
-This workflow processes a recorded Livox MID-360 bag once without RViz, saves
+This workflow processes a recorded Livox MID-360 or Pandar XT16 bag once without RViz, saves
 the computed FAST-LIO outputs, generates deterministic map and trajectory
 artifacts, and visualizes those frozen results later. It is independent of the
 interactive replay workflow and does not start the robot sensor stack.
 
-The source bag is read-only. The processing run consumes only /livox/lidar and
-/livox/imu; no secondary LiDAR topic is required.
+The source bag is read-only. The default MID-360 run consumes only
+/livox/lidar and /livox/imu. The offline XT16 profile consumes only /points_raw
+and /go2w/imu; no secondary LiDAR topic or live driver is required.
 
 ## Data flow
 
@@ -27,6 +28,22 @@ run directory
         | scripts/offline/visualize_fastlio_run.sh
         v
   static final-map view or growing replay of already-computed output
+~~~
+
+The XT16 profile inserts one fail-closed schema/time adapter before FAST-LIO:
+
+~~~text
+raw XT16 + Go2W bag
+  /points_raw + /go2w/imu
+        |
+        | hesai_pointcloud_adapter
+        | absolute timestamp -> relative time, stable sort, header offset
+        v
+  /points_raw_fastlio + /go2w/imu
+        |
+        | FAST-LIO + odom adapter + result recording
+        v
+same run-directory artifact contract
 ~~~
 
 The runner starts source-bag playback paused, waits for all processing and
@@ -85,6 +102,8 @@ Useful options are:
 
 | Option | Purpose |
 | --- | --- |
+| --sensor mid360\|xt16 | Select input profile; default mid360 |
+| --lidar-time-offset-sec SEC | Signed XT16 output-header shift; default 0.0 |
 | --start-offset SEC | Start within the source bag |
 | --duration SEC | Stop after an approximate bag duration; smoke tests only |
 | --rate RATE | Source playback multiplier; default 1.0 |
@@ -124,6 +143,17 @@ A custom configuration supplied with --config must preserve this input and
 output contract. The selected YAML, live parameter dump, launch source hash,
 runtime executable hashes, source-bag metadata hash, and Git revision are saved
 with each run.
+
+For `--sensor xt16`, the runner additionally validates:
+
+- common.lid_topic is /points_raw_fastlio and common.imu_topic is /go2w/imu
+- preprocess uses lidar_type 2, 16 scan lines, and relative seconds
+- FAST-LIO time synchronization and internal time offset are both disabled
+- the Hesai adapter remains alive throughout playback
+- the result bag contains /fastlio_go2w_hesai/diagnostics
+
+The run also saves `sensor_calibration.yaml`, `adapter_diagnostics.json`, the
+adapter executable hash, and the exact applied header offset in manifest.json.
 
 ## Generated artifacts
 

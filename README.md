@@ -1,6 +1,7 @@
 # fastlio-go2w
 
-FAST-LIO workspace for Unitree GO2-W with Livox MID-360 over a ROS 2 Humble stack.
+FAST-LIO workspace for Unitree GO2-W with a live Livox MID-360 path and an
+offline Pandar XT16 + onboard Go2W IMU path over ROS 2 Humble.
 
 The robot host can remain on its original Ubuntu / ROS distribution. On the GO2-W Jetson, this repository is intended to run the FAST-LIO stack inside the provided Ubuntu 22.04 / ROS 2 Humble container.
 
@@ -9,7 +10,8 @@ The repository mirrors the proven `dlio-go2w` structure, replacing the sensing a
 - `livox_ros_driver2` (Mid-360 ROS 2 driver)
 - `FAST_LIO` (`ROS2` branch)
 - `fastlio_go2w_bringup` (ROS 2 launch/config/rviz/adapter package)
-- `go2w_description` (vendored URDF, with mounted Mid-360 frames)
+- `fastlio_go2w_hesai` (offline XT16 PointCloud2 time/schema adapter)
+- `go2w_description` (vendored URDF, with mounted sensor frames)
 
 ## Table of contents
 
@@ -27,7 +29,7 @@ The repository mirrors the proven `dlio-go2w` structure, replacing the sensing a
 fastlio-go2w/
 ├── config/
 │   ├── cyclonedds.xml
-│   └── sensor/go2w_mid360_calibration.yaml
+│   └── sensor/{go2w_mid360_calibration.yaml,go2w_xt16_calibration.yaml}
 ├── docker/
 │   ├── Dockerfile
 │   └── run.sh
@@ -37,6 +39,7 @@ fastlio-go2w/
 │   ├── FAST_LIO/                 (submodule, a.k.a. FAST-LIO2 ROS2)
 │   ├── livox_ros_driver2/         (submodule)
 │   ├── go2w_description/          (vendored from frontier-fw-go2w)
+│   ├── fastlio_go2w_hesai/         (offline XT16 adapter)
 │   └── fastlio_go2w_bringup/      (launch + adapter + configs)
 ├── scripts/
 │   ├── setup_ws.sh
@@ -56,7 +59,9 @@ fastlio-go2w/
     └── record_raw.yaml
 ```
 
-`config/sensor/go2w_mid360_calibration.yaml` is the single source of truth for topic names and extrinsics in this workspace.
+The selected file under `config/sensor/` is the source of truth for that
+sensor profile's topic names and extrinsics. XT16 values are copied from the
+corresponding D-LIO Go2W mounting reference; they are not a new calibration.
 
 ## Submodules
 
@@ -222,11 +227,28 @@ bash scripts/offline/run_fastlio_offline.sh \
   "$BAG" --rate 1.0 --output "$OUT"
 ```
 
-The runner reads only `/livox/lidar` and `/livox/imu`. It starts playback
+The default runner reads only `/livox/lidar` and `/livox/imu`. It starts playback
 paused, verifies all processing and recording endpoints, validates the live
 FAST-LIO parameters, and then resumes the bag. The headless configuration
 retains the accuracy tuning while disabling cumulative `/Laser_map`, `/path`,
 the unused body-frame cloud, and FAST-LIO's built-in PCD writer.
+
+For an existing Pandar XT16 + onboard IMU recording, use the offline-only
+sensor profile. It reads the source bag directly and does not start a Hesai
+driver:
+
+```bash
+bash scripts/offline/run_fastlio_offline.sh \
+  /mnt/go2w-experiment-recorder/bags/experiment_long3_20260714_014823 \
+  --sensor xt16 \
+  --lidar-time-offset-sec 0.0 \
+  --rate 1.0 \
+  --output "$RESULTS_ROOT/fastlio/long3/xt16-zero"
+```
+
+This profile plays only `/points_raw` and `/go2w/imu`. See
+[`docs/xt16-go2w-offline.md`](docs/xt16-go2w-offline.md) for conversion rules,
+the reproducible time-offset sweep, diagnostics, and validation limits.
 
 A successful analyzed run contains:
 
