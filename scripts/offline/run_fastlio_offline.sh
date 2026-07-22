@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run reproducible headless FAST-LIO against a recorded MID-360 ROS 2 bag.
+# Run reproducible headless FAST-LIO against a recorded MID-360 or XT16 ROS 2 bag.
 
 set -Eeuo pipefail
 
@@ -12,13 +12,16 @@ Usage:
   scripts/offline/run_fastlio_offline.sh BAG [options]
 
 Options:
+  --sensor NAME       Input profile: mid360 or xt16 (default: mid360)
+  --lidar-time-offset-sec SEC
+                      Signed XT16 LiDAR header shift (default: 0.0)
   --start-offset SEC  Start this many seconds into the bag (default: 0)
   --duration SEC      Approximate bag seconds via wall timer (smoke tests only)
   --rate RATE         Rosbag playback multiplier (default: 1.0)
   --domain-id ID      Isolated ROS domain ID (default: 77)
   --output DIR        Result directory (default: ${FASTLIO_RESULTS_ROOT}/fastlio/<bag>/...)
-  --config YAML       Override tuning while preserving the MID-360 input and
-                      headless publisher contract
+  --config YAML       Override tuning while preserving the selected sensor's
+                      input and headless publisher contract
   --no-analyze        Keep the result bag but skip automatic artifact generation
   --map-voxel-size M  Final map voxel edge length (default: 0.20)
   --preview-max-points N
@@ -27,9 +30,9 @@ Options:
                       Deterministic local-plane sample seed (default: 7)
   -h, --help          Show this help
 
-The workspace must already be built. The runner plays only /livox/lidar and
-/livox/imu, starts playback paused, waits for every endpoint, then resumes
-through the rosbag player service.
+The workspace must already be built. MID-360 plays /livox/lidar + /livox/imu;
+XT16 plays /points_raw + /go2w/imu. Playback starts paused, waits for every
+endpoint, then resumes through the rosbag player service.
 EOF
 }
 
@@ -39,6 +42,8 @@ die() {
 }
 
 BAG=""
+SENSOR="mid360"
+LIDAR_TIME_OFFSET_SEC="0.0"
 START_OFFSET="0"
 DURATION=""
 RATE="1.0"
@@ -53,6 +58,14 @@ FASTLIO_RESULTS_ROOT="${FASTLIO_RESULTS_ROOT:-$REPO_ROOT/results}"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --sensor)
+            SENSOR="${2:?Error: --sensor requires a value}"
+            shift 2
+            ;;
+        --lidar-time-offset-sec)
+            LIDAR_TIME_OFFSET_SEC="${2:?Error: --lidar-time-offset-sec requires a value}"
+            shift 2
+            ;;
         --start-offset)
             START_OFFSET="${2:?Error: --start-offset requires a value}"
             shift 2
@@ -110,8 +123,28 @@ done
 
 [ -n "$BAG" ] || die "a bag directory is required"
 
+case "$SENSOR" in
+    mid360)
+        SOURCE_TOPICS=(/livox/lidar /livox/imu)
+        DEFAULT_CONFIG_NAME="mid360_go2w_accuracy_offline.yaml"
+        EXPECTED_LID_TOPIC="/livox/lidar"
+        EXPECTED_SCAN_LINES="4"
+        ;;
+    xt16)
+        SOURCE_TOPICS=(/points_raw /go2w/imu)
+        DEFAULT_CONFIG_NAME="xt16_go2w_accuracy_offline.yaml"
+        EXPECTED_LID_TOPIC="/points_raw_fastlio"
+        EXPECTED_SCAN_LINES="16"
+        ;;
+    *)
+        die "--sensor must be mid360 or xt16"
+        ;;
+esac
+
 python3 -c 'import sys; value=float(sys.argv[1]); sys.exit(not value >= 0)' "$START_OFFSET" \
     || die "--start-offset must be a non-negative number"
+python3 -c 'import math,sys; value=float(sys.argv[1]); sys.exit(not math.isfinite(value))' \
+    "$LIDAR_TIME_OFFSET_SEC" || die "--lidar-time-offset-sec must be finite"
 python3 -c 'import sys; value=float(sys.argv[1]); sys.exit(not value > 0)' "$RATE" \
     || die "--rate must be greater than zero"
 if [ "$ANALYZE" = "true" ]; then
@@ -131,7 +164,7 @@ fi
 BAG="$(realpath "$BAG")"
 [ -d "$BAG" ] || die "bag directory not found: $BAG"
 [ -f "$BAG/metadata.yaml" ] || die "bag metadata not found: $BAG/metadata.yaml"
-for topic in /livox/lidar /livox/imu; do
+for topic in "${SOURCE_TOPICS[@]}"; do
     grep -Eq "name: ${topic}$" "$BAG/metadata.yaml" \
         || die "required topic $topic is absent from the bag"
 done
@@ -148,7 +181,7 @@ if [ -n "$CONFIG_OVERRIDE" ]; then
         die "FAST-LIO config not found: $CONFIG_OVERRIDE"
     fi
 else
-    FASTLIO_CONFIG="$CONFIG_DIR/mid360_go2w_accuracy_offline.yaml"
+    FASTLIO_CONFIG="$CONFIG_DIR/$DEFAULT_CONFIG_NAME"
 fi
 [ -f "$FASTLIO_CONFIG" ] || die "offline config not found: $FASTLIO_CONFIG"
 
@@ -165,6 +198,8 @@ fi
 
 if [ -f /opt/ros/humble/setup.bash ]; then
     set +u
+    # This fixed ROS path exists only in the Humble image.
+    # shellcheck disable=SC1091
     source /opt/ros/humble/setup.bash
     set -u
 elif [ "${ROS_DISTRO:-}" != "humble" ]; then
@@ -186,32 +221,48 @@ if [ "$ANALYZE" = "true" ]; then
     ANALYZER_SOURCE="$SCRIPT_DIR/analyze_fastlio_run.py"
     [ -f "$ANALYZER_SOURCE" ] || die "analyzer not found: $ANALYZER_SOURCE"
 fi
+DIAGNOSTICS_EXTRACTOR_SOURCE=""
+if [ "$SENSOR" = "xt16" ]; then
+    DIAGNOSTICS_EXTRACTOR_SOURCE="$SCRIPT_DIR/extract_hesai_diagnostics.py"
+    [ -f "$DIAGNOSTICS_EXTRACTOR_SOURCE" ] \
+        || die "Hesai diagnostics extractor not found: $DIAGNOSTICS_EXTRACTOR_SOURCE"
+fi
 
 candidate_is_usable() {
     local candidate="$1"
     local install_root bringup_prefix launch_runtime fastlio_runtime
-    local odom_runtime
+    local odom_runtime hesai_runtime
     install_root="$(dirname "$candidate")"
     bringup_prefix="$install_root/fastlio_go2w_bringup"
     launch_runtime="$bringup_prefix/share/fastlio_go2w_bringup/launch/offline_fastlio.launch.py"
     fastlio_runtime="$install_root/fast_lio/lib/fast_lio/fastlio_mapping"
     odom_runtime="$bringup_prefix/lib/fastlio_go2w_bringup/fastlio_odom_adapter"
+    hesai_runtime="$install_root/fastlio_go2w_hesai/lib/fastlio_go2w_hesai/hesai_pointcloud_adapter"
 
     [ -f "$candidate" ] || return 1
     [ -f "$launch_runtime" ] || return 1
     [ -x "$fastlio_runtime" ] || return 1
     [ -x "$odom_runtime" ] || return 1
+    if [ "$SENSOR" = "xt16" ]; then
+        [ -x "$hesai_runtime" ] || return 1
+    fi
     [ "$(sha256sum "$launch_runtime" | awk '{print $1}')" = "$LAUNCH_SHA256" ] \
         || return 1
 
     (
         set +u
+        # Candidate is an intentionally discovered overlay.
+        # shellcheck disable=SC1090
         source "$candidate"
         set -u
         [ "$(ros2 pkg prefix fastlio_go2w_bringup 2>/dev/null)" = "$bringup_prefix" ] \
             || exit 1
         [ "$(ros2 pkg prefix fast_lio 2>/dev/null)" = "$install_root/fast_lio" ] \
             || exit 1
+        if [ "$SENSOR" = "xt16" ]; then
+            [ "$(ros2 pkg prefix fastlio_go2w_hesai 2>/dev/null)" = \
+                "$install_root/fastlio_go2w_hesai" ] || exit 1
+        fi
     )
 }
 
@@ -227,6 +278,8 @@ done
 [ -n "$WORKSPACE_SETUP" ] \
     || die "no usable current Humble workspace overlay was found; rebuild the workspace"
 set +u
+# The selected overlay was validated above.
+# shellcheck disable=SC1090
 source "$WORKSPACE_SETUP"
 set -u
 
@@ -236,8 +289,14 @@ LAUNCH_RUNTIME="$BRINGUP_PREFIX/share/fastlio_go2w_bringup/launch/offline_fastli
 LAUNCH_RUNTIME_SHA256="$(sha256sum "$LAUNCH_RUNTIME" | awk '{print $1}')"
 FASTLIO_RUNTIME="$INSTALL_ROOT/fast_lio/lib/fast_lio/fastlio_mapping"
 ODOM_ADAPTER_RUNTIME="$BRINGUP_PREFIX/lib/fastlio_go2w_bringup/fastlio_odom_adapter"
+HESAI_ADAPTER_RUNTIME=""
+HESAI_ADAPTER_RUNTIME_SHA256=""
 FASTLIO_RUNTIME_SHA256="$(sha256sum "$FASTLIO_RUNTIME" | awk '{print $1}')"
 ODOM_ADAPTER_RUNTIME_SHA256="$(sha256sum "$ODOM_ADAPTER_RUNTIME" | awk '{print $1}')"
+if [ "$SENSOR" = "xt16" ]; then
+    HESAI_ADAPTER_RUNTIME="$INSTALL_ROOT/fastlio_go2w_hesai/lib/fastlio_go2w_hesai/hesai_pointcloud_adapter"
+    HESAI_ADAPTER_RUNTIME_SHA256="$(sha256sum "$HESAI_ADAPTER_RUNTIME" | awk '{print $1}')"
+fi
 
 python3 -c 'import rosbag2_py' >/dev/null 2>&1 \
     || die "rosbag2 Python support is required for result validation"
@@ -263,6 +322,20 @@ RESULT_BAG="$OUTPUT_DIR/rosbag"
 FASTLIO_CONFIG_SNAPSHOT="$OUTPUT_DIR/fastlio_config.yaml"
 FASTLIO_PARAMETERS_SNAPSHOT="$OUTPUT_DIR/fastlio_mapping.yaml"
 FASTLIO_PARAMETERS_SHA256=""
+CALIBRATION_SOURCE="$REPO_ROOT/config/sensor/go2w_${SENSOR}_calibration.yaml"
+CALIBRATION_SNAPSHOT="$OUTPUT_DIR/sensor_calibration.yaml"
+[ -f "$CALIBRATION_SOURCE" ] || die "sensor calibration not found: $CALIBRATION_SOURCE"
+CALIBRATION_SHA256=""
+ADAPTER_DIAGNOSTICS=""
+ADAPTER_DIAGNOSTICS_SHA256=""
+DIAGNOSTICS_EXTRACTOR_SNAPSHOT=""
+DIAGNOSTICS_EXTRACTOR_SHA256=""
+if [ "$SENSOR" = "xt16" ]; then
+    ADAPTER_DIAGNOSTICS="$OUTPUT_DIR/adapter_diagnostics.json"
+    DIAGNOSTICS_EXTRACTOR_SNAPSHOT="$OUTPUT_DIR/extract_hesai_diagnostics.py"
+    cp "$DIAGNOSTICS_EXTRACTOR_SOURCE" "$DIAGNOSTICS_EXTRACTOR_SNAPSHOT"
+    DIAGNOSTICS_EXTRACTOR_SHA256="$(sha256sum "$DIAGNOSTICS_EXTRACTOR_SNAPSHOT" | awk '{print $1}')"
+fi
 ANALYZER_SNAPSHOT=""
 ANALYZER_SHA256=""
 ANALYSIS_LOG=""
@@ -278,6 +351,8 @@ RESULT_BAG_VALIDATION_LOG="$OUTPUT_DIR/result-bag-validation.log"
 RESOURCE_VALIDATION_LOG="$OUTPUT_DIR/resource-validation.log"
 
 cp "$FASTLIO_CONFIG" "$FASTLIO_CONFIG_SNAPSHOT"
+cp "$CALIBRATION_SOURCE" "$CALIBRATION_SNAPSHOT"
+CALIBRATION_SHA256="$(sha256sum "$CALIBRATION_SNAPSHOT" | awk '{print $1}')"
 git -C "$REPO_ROOT" status --short > "$OUTPUT_DIR/git-status.txt"
 
 MANIFEST="$OUTPUT_DIR/manifest.json"
@@ -315,12 +390,15 @@ write_manifest() {
     MANIFEST_STATE="$state" MANIFEST_EXIT_CODE="$exit_code" \
     EXP_BAG="$BAG" EXP_START_OFFSET="$START_OFFSET" \
     EXP_DURATION="$DURATION" EXP_RATE="$RATE" EXP_DOMAIN_ID="$DOMAIN_ID" \
+    EXP_SENSOR="$SENSOR" EXP_SOURCE_TOPICS="${SOURCE_TOPICS[*]}" \
+    EXP_LIDAR_TIME_OFFSET_SEC="$LIDAR_TIME_OFFSET_SEC" \
     EXP_STARTED_AT="$RUN_STARTED_AT" \
     EXP_CONFIG="$FASTLIO_CONFIG" EXP_CONFIG_SHA="$CONFIG_SHA256" \
     EXP_RUNTIME_CONFIG="$FASTLIO_CONFIG_SNAPSHOT" \
     EXP_FASTLIO_PARAMETERS="$FASTLIO_PARAMETERS_SNAPSHOT" \
     EXP_FASTLIO_PARAMETERS_SHA="$FASTLIO_PARAMETERS_SHA256" \
     EXP_METADATA_SHA="$METADATA_SHA256" EXP_LAUNCH_SHA="$LAUNCH_SHA256" \
+    EXP_LAUNCH_RUNTIME_SHA="$LAUNCH_RUNTIME_SHA256" \
     EXP_GIT_COMMIT="$GIT_COMMIT" EXP_OUTPUT="$OUTPUT_DIR" \
     EXP_WORKSPACE_SETUP="$WORKSPACE_SETUP" \
     EXP_LAUNCH_SOURCE="$LAUNCH_SOURCE" EXP_LAUNCH_RUNTIME="$LAUNCH_RUNTIME" \
@@ -328,6 +406,15 @@ write_manifest() {
     EXP_FASTLIO_RUNTIME_SHA="$FASTLIO_RUNTIME_SHA256" \
     EXP_ODOM_RUNTIME="$ODOM_ADAPTER_RUNTIME" \
     EXP_ODOM_RUNTIME_SHA="$ODOM_ADAPTER_RUNTIME_SHA256" \
+    EXP_HESAI_RUNTIME="$HESAI_ADAPTER_RUNTIME" \
+    EXP_HESAI_RUNTIME_SHA="$HESAI_ADAPTER_RUNTIME_SHA256" \
+    EXP_CALIBRATION_SOURCE="$CALIBRATION_SOURCE" \
+    EXP_CALIBRATION_SNAPSHOT="$CALIBRATION_SNAPSHOT" \
+    EXP_CALIBRATION_SHA="$CALIBRATION_SHA256" \
+    EXP_ADAPTER_DIAGNOSTICS="$ADAPTER_DIAGNOSTICS" \
+    EXP_ADAPTER_DIAGNOSTICS_SHA="$ADAPTER_DIAGNOSTICS_SHA256" \
+    EXP_DIAGNOSTICS_EXTRACTOR="$DIAGNOSTICS_EXTRACTOR_SNAPSHOT" \
+    EXP_DIAGNOSTICS_EXTRACTOR_SHA="$DIAGNOSTICS_EXTRACTOR_SHA256" \
     EXP_LAUNCH_PID="$LAUNCH_PID" EXP_RECORDER_PID="$RECORDER_PID" \
     EXP_PLAYER_PID="$PLAYER_PID" EXP_SAMPLER_PID="$SAMPLER_PID" \
     EXP_ANALYZE="$ANALYZE" EXP_MAP_VOXEL_SIZE="$MAP_VOXEL_SIZE" \
@@ -370,6 +457,15 @@ def optional_name(value):
     return pathlib.Path(value).name if value else None
 
 analysis_enabled = env["EXP_ANALYZE"] == "true"
+adapter_diagnostics = None
+adapter_diagnostics_path = env.get("EXP_ADAPTER_DIAGNOSTICS", "")
+if adapter_diagnostics_path and pathlib.Path(adapter_diagnostics_path).is_file():
+    try:
+        adapter_diagnostics = json.loads(
+            pathlib.Path(adapter_diagnostics_path).read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as error:
+        adapter_diagnostics = {"read_error": str(error)}
 analysis_details = {
     "enabled": analysis_enabled,
     "voxel_size_m": None,
@@ -412,6 +508,8 @@ run_logs = [
     optional_name(env["EXP_RESULT_VALIDATION_LOG"]),
     optional_name(env["EXP_RESOURCE_VALIDATION_LOG"]),
 ]
+if env["EXP_SENSOR"] == "xt16":
+    run_logs.append("adapter-diagnostics.log")
 if analysis_enabled:
     run_logs.append(optional_name(env["EXP_ANALYSIS_LOG"]))
 
@@ -426,12 +524,14 @@ document = {
         "metadata_sha256": env["EXP_METADATA_SHA"],
     },
     "profile": "baseline",
+    "sensor": env["EXP_SENSOR"],
     "playback": {
-        "topics": ["/livox/lidar", "/livox/imu"],
+        "topics": env["EXP_SOURCE_TOPICS"].split(),
         "start_offset_s": float(env["EXP_START_OFFSET"]),
         "duration_s": optional_float(env["EXP_DURATION"]),
         "rate": float(env["EXP_RATE"]),
         "ros_domain_id": int(env["EXP_DOMAIN_ID"]),
+        "lidar_time_offset_sec": float(env["EXP_LIDAR_TIME_OFFSET_SEC"]),
     },
     "drain": {
         "stable_seconds": float(env["EXP_DRAIN_STABLE_SECONDS"]),
@@ -458,6 +558,20 @@ document = {
         "pcd_save_en": False,
         "runtime_pos_log_enable": False,
     },
+    "calibration": {
+        "source": env["EXP_CALIBRATION_SOURCE"],
+        "snapshot": pathlib.Path(env["EXP_CALIBRATION_SNAPSHOT"]).name,
+        "sha256": env["EXP_CALIBRATION_SHA"],
+    },
+    "hesai_adapter": {
+        "enabled": env["EXP_SENSOR"] == "xt16",
+        "lidar_time_offset_sec": float(env["EXP_LIDAR_TIME_OFFSET_SEC"]),
+        "diagnostics_path": optional_name(adapter_diagnostics_path),
+        "diagnostics_sha256": env.get("EXP_ADAPTER_DIAGNOSTICS_SHA") or None,
+        "diagnostics": adapter_diagnostics,
+        "extractor_snapshot": optional_name(env.get("EXP_DIAGNOSTICS_EXTRACTOR", "")),
+        "extractor_sha256": env.get("EXP_DIAGNOSTICS_EXTRACTOR_SHA") or None,
+    },
     "analysis": analysis_details,
     "git": {
         "commit": env["EXP_GIT_COMMIT"],
@@ -467,6 +581,7 @@ document = {
     "launch_sha256": env["EXP_LAUNCH_SHA"],
     "launch_source": env["EXP_LAUNCH_SOURCE"],
     "launch_runtime": env["EXP_LAUNCH_RUNTIME"],
+    "launch_runtime_sha256": env["EXP_LAUNCH_RUNTIME_SHA"],
     "runtime_executables": {
         "fastlio": {
             "path": env["EXP_FASTLIO_RUNTIME"],
@@ -476,6 +591,14 @@ document = {
             "path": env["EXP_ODOM_RUNTIME"],
             "sha256": env["EXP_ODOM_RUNTIME_SHA"],
         },
+        "hesai_pointcloud_adapter": (
+            {
+                "path": env["EXP_HESAI_RUNTIME"],
+                "sha256": env["EXP_HESAI_RUNTIME_SHA"],
+            }
+            if env["EXP_SENSOR"] == "xt16"
+            else None
+        ),
     },
     "process_ids": {
         "launch": optional_int(env["EXP_LAUNCH_PID"]),
@@ -490,6 +613,8 @@ document = {
         "resource_metrics_sha256": env.get("EXP_RESOURCE_METRICS_SHA") or None,
         "resource_summary": "resource_summary.json",
         "resource_summary_sha256": env.get("EXP_RESOURCE_SUMMARY_SHA") or None,
+        "adapter_diagnostics": optional_name(adapter_diagnostics_path),
+        "adapter_diagnostics_sha256": env.get("EXP_ADAPTER_DIAGNOSTICS_SHA") or None,
         "commands": "commands.log",
         "logs": run_logs,
     },
@@ -503,12 +628,12 @@ PY
 
 process_group_alive() {
     local pgid="${1:-}"
-    local stat_file record state ppid process_group
+    local stat_file record state process_group
     [ -n "$pgid" ] || return 1
     for stat_file in /proc/[0-9]*/stat; do
         IFS= read -r record 2>/dev/null < "$stat_file" || continue
         record="${record##*) }"
-        read -r state ppid process_group _ <<<"$record"
+        read -r state _ process_group _ <<<"$record"
         [ "$process_group" = "$pgid" ] || continue
         case "$state" in
             Z|X) ;;
@@ -616,38 +741,89 @@ wait_for_topic() {
     return 1
 }
 
-assert_fastlio_parameter() {
-    local name="$1"
-    local expected="$2"
-    local actual
-    if ! actual="$(ros2 param get --no-daemon --hide-type /fastlio_mapping "$name")"; then
-        echo "Could not read FAST-LIO parameter $name." >&2
-        return 1
-    fi
-    if [ "$actual" != "$expected" ]; then
-        echo "FAST-LIO parameter $name is '$actual', expected '$expected'." >&2
-        return 1
-    fi
-}
-
 validate_fastlio_parameters() {
-    assert_fastlio_parameter common.lid_topic /livox/lidar || return 1
-    assert_fastlio_parameter preprocess.scan_line 4 || return 1
-    assert_fastlio_parameter publish.map_en False || return 1
-    assert_fastlio_parameter publish.path_en False || return 1
-    assert_fastlio_parameter publish.effect_map_en False || return 1
-    assert_fastlio_parameter publish.scan_bodyframe_pub_en False || return 1
-    assert_fastlio_parameter publish.scan_publish_en True || return 1
-    assert_fastlio_parameter publish.dense_publish_en False || return 1
-    assert_fastlio_parameter pcd_save.pcd_save_en False || return 1
-    assert_fastlio_parameter runtime_pos_log_enable False || return 1
+    VALIDATE_SENSOR="$SENSOR" \
+    VALIDATE_LID_TOPIC="$EXPECTED_LID_TOPIC" \
+    VALIDATE_SCAN_LINES="$EXPECTED_SCAN_LINES" \
+    python3 - "$FASTLIO_PARAMETERS_SNAPSHOT" <<'PY'
+from pathlib import Path
+import os
+import sys
+
+import yaml
+
+path = Path(sys.argv[1])
+document = yaml.safe_load(path.read_text(encoding="utf-8"))
+try:
+    parameters = document["/fastlio_mapping"]["ros__parameters"]
+except (KeyError, TypeError) as error:
+    raise SystemExit("live parameter dump has no /fastlio_mapping.ros__parameters") from error
+
+def nested(name):
+    value = parameters
+    for part in name.split("."):
+        if not isinstance(value, dict) or part not in value:
+            raise SystemExit(f"live parameter dump is missing {name}")
+        value = value[part]
+    return value
+
+expected = {
+    "common.lid_topic": os.environ["VALIDATE_LID_TOPIC"],
+    "common.time_sync_en": False,
+    "common.time_offset_lidar_to_imu": 0.0,
+    "preprocess.scan_line": int(os.environ["VALIDATE_SCAN_LINES"]),
+    "publish.map_en": False,
+    "publish.path_en": False,
+    "publish.effect_map_en": False,
+    "publish.scan_bodyframe_pub_en": False,
+    "publish.scan_publish_en": True,
+    "publish.dense_publish_en": False,
+    "pcd_save.pcd_save_en": False,
+    "runtime_pos_log_enable": False,
+}
+if os.environ["VALIDATE_SENSOR"] == "xt16":
+    expected.update(
+        {
+            "common.imu_topic": "/go2w/imu",
+            "preprocess.lidar_type": 2,
+            "preprocess.timestamp_unit": 0,
+        }
+    )
+errors = []
+for name, wanted in expected.items():
+    actual = nested(name)
+    if actual != wanted:
+        errors.append(f"{name}={actual!r}, expected {wanted!r}")
+if errors:
+    raise SystemExit("live FAST-LIO contract violation:\n" + "\n".join(errors))
+print(f"validated {len(expected)} live FAST-LIO parameters from {path}")
+PY
 }
 
 required_processing_nodes_alive() {
-    local nodes
-    nodes="$(ros2 node list --no-daemon 2>/dev/null)" || return 1
-    for node in /fastlio_mapping /fastlio_odom_adapter; do
-        grep -Fxq "$node" <<<"$nodes" || return 1
+    local required_commands=(fastlio_mapping fastlio_odom_adapter)
+    if [ "$SENSOR" = "xt16" ]; then
+        required_commands+=(hesai_pointcloud_adapter)
+    fi
+    local command stat_file record state process_group pid
+    for command in "${required_commands[@]}"; do
+        local found="false"
+        for stat_file in /proc/[0-9]*/stat; do
+            pid="${stat_file#/proc/}"
+            pid="${pid%/stat}"
+            IFS= read -r record 2>/dev/null < "$stat_file" || continue
+            record="${record##*) }"
+            read -r state _ process_group _ <<<"$record"
+            [ "$process_group" = "$LAUNCH_PID" ] || continue
+            case "$state" in
+                Z|X) continue ;;
+            esac
+            if grep -aFq -- "$command" "/proc/$pid/cmdline" 2>/dev/null; then
+                found="true"
+                break
+            fi
+        done
+        [ "$found" = "true" ] || return 1
     done
     return 0
 }
@@ -768,9 +944,10 @@ validate_result_bag() {
     ros2 bag info "$RESULT_BAG"
     echo
     echo "metadata and reader validation:"
-    python3 - "$RESULT_BAG" <<'PY'
+    VALIDATE_SENSOR="$SENSOR" python3 - "$RESULT_BAG" <<'PY'
 from pathlib import Path
 import json
+import os
 import sys
 
 import rosbag2_py
@@ -849,6 +1026,8 @@ if total_count != sum(counts.values()):
     )
 
 required = ["/odom", "/Odometry", "/cloud_registered"]
+if os.environ.get("VALIDATE_SENSOR") == "xt16":
+    required.append("/fastlio_go2w_hesai/diagnostics")
 missing = [name for name in required if counts.get(name, 0) <= 0]
 if missing:
     raise SystemExit(
@@ -895,16 +1074,20 @@ PY
 }
 
 validate_resource_artifacts() {
+    VALIDATE_RESOURCE_SENSOR="$SENSOR" \
     python3 - "$METRICS_CSV" "$METRICS_SUMMARY" <<'PY'
 from collections import Counter
 from pathlib import Path
 import csv
 import json
+import os
 import sys
 
 csv_path = Path(sys.argv[1])
 summary_path = Path(sys.argv[2])
 required = {"fastlio", "player", "recorder"}
+if os.environ.get("VALIDATE_RESOURCE_SENSOR") == "xt16":
+    required.add("hesai_adapter")
 
 if not csv_path.is_file() or csv_path.stat().st_size <= 0:
     raise SystemExit(f"resource metrics CSV is missing or empty: {csv_path}")
@@ -998,13 +1181,18 @@ PY
 LAUNCH_CMD=(
     ros2 launch fastlio_go2w_bringup offline_fastlio.launch.py
     "config:=$FASTLIO_CONFIG_SNAPSHOT"
+    "sensor:=$SENSOR"
+    "lidar_time_offset_sec:=$LIDAR_TIME_OFFSET_SEC"
 )
 RECORD_TOPICS=(/odom /Odometry /cloud_registered)
+if [ "$SENSOR" = "xt16" ]; then
+    RECORD_TOPICS+=(/fastlio_go2w_hesai/diagnostics)
+fi
 RECORDER_CMD=(ros2 bag record --use-sim-time -o "$RESULT_BAG" "${RECORD_TOPICS[@]}")
 PLAYER_CMD=(
     ros2 bag play "$BAG" --clock --rate "$RATE" --start-paused
     --disable-keyboard-controls --start-offset "$START_OFFSET"
-    --topics /livox/lidar /livox/imu
+    --topics "${SOURCE_TOPICS[@]}"
 )
 ANALYZE_CMD=()
 if [ "$ANALYZE" = "true" ]; then
@@ -1017,10 +1205,20 @@ if [ "$ANALYZE" = "true" ]; then
         --plane-random-seed "$PLANE_RANDOM_SEED"
     )
 fi
+DIAGNOSTICS_CMD=()
+if [ "$SENSOR" = "xt16" ]; then
+    DIAGNOSTICS_CMD=(
+        python3 "$DIAGNOSTICS_EXTRACTOR_SNAPSHOT" "$RESULT_BAG"
+        --output "$ADAPTER_DIAGNOSTICS"
+    )
+fi
 {
     printf 'launch:'; printf ' %q' "${LAUNCH_CMD[@]}"; printf '\n'
     printf 'record:'; printf ' %q' "${RECORDER_CMD[@]}"; printf '\n'
     printf 'play:'; printf ' %q' "${PLAYER_CMD[@]}"; printf '\n'
+    if [ "$SENSOR" = "xt16" ]; then
+        printf 'diagnostics:'; printf ' %q' "${DIAGNOSTICS_CMD[@]}"; printf '\n'
+    fi
     if [ "$ANALYZE" = "true" ]; then
         printf 'analyze:'; printf ' %q' "${ANALYZE_CMD[@]}"; printf '\n'
     fi
@@ -1041,6 +1239,10 @@ PLAYER_PID=$!
 
 wait_for_node /fastlio_mapping || die "FAST-LIO did not become ready; see launch.log"
 wait_for_node /fastlio_odom_adapter || die "odom adapter did not become ready; see launch.log"
+if [ "$SENSOR" = "xt16" ]; then
+    wait_for_node /hesai_pointcloud_adapter \
+        || die "Hesai adapter did not become ready; see launch.log"
+fi
 ros2 param dump --no-daemon --output-dir "$OUTPUT_DIR" /fastlio_mapping \
     > "$PARAMETER_DUMP_LOG" 2>&1
 [ -s "$FASTLIO_PARAMETERS_SNAPSHOT" ] \
@@ -1054,8 +1256,15 @@ validate_fastlio_parameters \
 FASTLIO_PARAMETERS_SHA256="$(sha256sum "$FASTLIO_PARAMETERS_SNAPSHOT" | awk '{print $1}')"
 wait_for_service /rosbag2_player/resume || die "rosbag player resume service did not appear"
 
-wait_for_topic /livox/lidar 1 1 || die "/livox/lidar endpoints did not become ready"
-wait_for_topic /livox/imu 1 1 || die "/livox/imu endpoints did not become ready"
+for topic in "${SOURCE_TOPICS[@]}"; do
+    wait_for_topic "$topic" 1 1 || die "$topic endpoints did not become ready"
+done
+if [ "$SENSOR" = "xt16" ]; then
+    wait_for_topic /points_raw_fastlio 1 1 \
+        || die "/points_raw_fastlio endpoints did not become ready"
+    wait_for_topic /fastlio_go2w_hesai/diagnostics 1 1 \
+        || die "Hesai diagnostics endpoints did not become ready"
+fi
 wait_for_topic /Odometry 1 1 || die "/Odometry endpoints did not become ready"
 wait_for_topic /odom 1 1 || die "/odom endpoints did not become ready"
 wait_for_topic /cloud_registered 1 1 || die "/cloud_registered endpoints did not become ready"
@@ -1068,6 +1277,9 @@ SAMPLER_CMD=(
     --output "$METRICS_CSV" --summary "$METRICS_SUMMARY"
     --stop-file "$STOP_FILE" --interval 1.0
 )
+if [ "$SENSOR" = "xt16" ]; then
+    SAMPLER_CMD+=(--target "hesai_adapter:$LAUNCH_PID:hesai_pointcloud_adapter")
+fi
 setsid "${SAMPLER_CMD[@]}" > "$OUTPUT_DIR/metrics.log" 2>&1 &
 SAMPLER_PID=$!
 
@@ -1141,6 +1353,16 @@ if ! validate_result_bag > "$RESULT_BAG_VALIDATION_LOG" 2>&1; then
     die "finalized result bag validation failed; see $RESULT_BAG_VALIDATION_LOG"
 fi
 RESULT_METADATA_SHA256="$(sha256sum "$RESULT_BAG/metadata.yaml" | awk '{print $1}')"
+
+if [ "$SENSOR" = "xt16" ]; then
+    if ! "${DIAGNOSTICS_CMD[@]}" > "$OUTPUT_DIR/adapter-diagnostics.log" 2>&1; then
+        tail -n 40 "$OUTPUT_DIR/adapter-diagnostics.log" >&2 || true
+        die "Hesai adapter diagnostics extraction failed"
+    fi
+    [ -s "$ADAPTER_DIAGNOSTICS" ] \
+        || die "Hesai adapter diagnostics artifact was not created"
+    ADAPTER_DIAGNOSTICS_SHA256="$(sha256sum "$ADAPTER_DIAGNOSTICS" | awk '{print $1}')"
+fi
 
 if ! validate_resource_artifacts > "$RESOURCE_VALIDATION_LOG" 2>&1; then
     tail -n 40 "$RESOURCE_VALIDATION_LOG" >&2 || true
