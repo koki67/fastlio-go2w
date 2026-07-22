@@ -1,0 +1,62 @@
+# GO2-W + Hesai Pandar XT16 calibration source of truth
+#
+# Values are copied from dlio-go2w/config/sensor/go2w_calibration.yaml and
+# dlio-go2w's active D-LIO extrinsics on 2026-07-22. They are mounting
+# references, not the result of a new FAST-LIO calibration.
+
+frames:
+  base_link: base_link
+  lidar_frame: hesai_lidar
+  imu_frame: imu
+  camera_init: camera_init
+  odom: odom
+
+topics:
+  lidar_raw: /points_raw
+  lidar_fastlio: /points_raw_fastlio
+  imu: /go2w/imu
+  odom_raw: /Odometry
+  odom_out: /odom
+  diagnostics: /fastlio_go2w_hesai/diagnostics
+
+extrinsics:
+  T_baselink_lidar:
+    translation: [0.1634, 0.0, 0.116]
+    rotation_quaternion: [0.0, 0.0, 0.7071068, 0.7071068]  # Z +90 deg
+    rotation_matrix: [0.0, -1.0, 0.0,
+                      1.0,  0.0, 0.0,
+                      0.0,  0.0, 1.0]
+  T_baselink_imu:
+    translation: [-0.02557, 0.0, 0.04232]
+    rotation_quaternion: [0.0, 0.0, 0.0, 1.0]
+    rotation_matrix: [1.0, 0.0, 0.0,
+                      0.0, 1.0, 0.0,
+                      0.0, 0.0, 1.0]
+  # Transform used by FAST-LIO: points in hesai_lidar are expressed in imu.
+  T_lidar_imu:
+    translation: [0.18897, 0.0, 0.07368]
+    rotation_quaternion: [0.0, 0.0, 0.7071068, 0.7071068]
+    rotation_matrix: [0.0, -1.0, 0.0,
+                      1.0,  0.0, 0.0,
+                      0.0,  0.0, 1.0]
+
+imu_noise_reference:
+  # Initial FAST-LIO values copied from the D-LIO sensor reference. They have
+  # not been tuned or measured for FAST-LIO on these recordings.
+  accelerometer: 0.05
+  gyroscope: 0.02
+  integration: 0.001
+  bias: 1.0e-5
+
+timing:
+  # Header shift applied by hesai_pointcloud_adapter. Point timestamps remain
+  # relative to the unshifted raw header; FAST-LIO internal correction is off.
+  lidar_time_offset_sec: 0.0
+  fastlio_time_sync_en: false
+  fastlio_time_offset_lidar_to_imu_sec: 0.0
+  sweep_candidates_ms: [-10, -5, 0, 5, 10]
+
+notes:
+  - "The source bag stays read-only; /points_raw is converted in memory."
+  - "The approximately 7.2 s point-time defect in existing recordings is rejected frame-by-frame."
+  - "Physical-robot, Jetson, absolute-accuracy, and corrected-driver recordings remain UNVERIFIED."

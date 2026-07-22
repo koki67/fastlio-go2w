@@ -4,7 +4,7 @@
 <package format="3">
   <name>fastlio_go2w_bringup</name>
   <version>0.1.0</version>
-  <description>FAST-LIO bringup for GO2-W with Livox MID-360.</description>
+  <description>FAST-LIO bringup for GO2-W with MID-360 and offline XT16 profiles.</description>
   <maintainer email="67k.tanaka@gmail.com">Koki Tanaka</maintainer>
   <license>MIT</license>
 
@@ -21,6 +21,7 @@
   <depend>fast_lio</depend>
   <depend>livox_ros_driver2</depend>
   <depend>go2w_description</depend>
+  <exec_depend>fastlio_go2w_hesai</exec_depend>
   <exec_depend>joint_state_publisher</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>rviz2</exec_depend>

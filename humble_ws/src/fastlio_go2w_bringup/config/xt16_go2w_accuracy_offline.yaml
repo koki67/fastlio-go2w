@@ -1,0 +1,53 @@
+/**:
+    ros__parameters:
+        feature_extract_enable: false
+        point_filter_num: 4
+        max_iteration: 3
+        filter_size_surf: 0.2
+        filter_size_map: 0.2
+        cube_side_length: 1000.0
+        runtime_pos_log_enable: false
+        map_file_path: "./test.pcd"
+
+        common:
+            lid_topic: /points_raw_fastlio
+            imu_topic: /go2w/imu
+            # The adapter applies the only time correction by shifting the
+            # LiDAR header. Keep both FAST-LIO correction paths disabled.
+            time_sync_en: false
+            time_offset_lidar_to_imu: 0.0
+
+        preprocess:
+            lidar_type: 2       # Velodyne-style PointCloud2 x/y/z/intensity/time/ring
+            scan_line: 16
+            blind: 0.5
+            timestamp_unit: 0   # adapter output time is relative seconds
+            scan_rate: 10
+
+        mapping:
+            # Initial references copied from dlio-go2w sensor calibration.
+            # These are not measured FAST-LIO tuning values for the Go2W IMU.
+            acc_cov: 0.05
+            gyr_cov: 0.02
+            b_acc_cov: 0.00001
+            b_gyr_cov: 0.00001
+            fov_degree: 360.0
+            det_range: 100.0
+            extrinsic_est_en: false
+            # hesai_lidar -> imu, composed from the D-LIO base-frame mounts.
+            extrinsic_T: [0.18897, 0.0, 0.07368]
+            extrinsic_R: [0.0, -1.0, 0.0,
+                          1.0,  0.0, 0.0,
+                          0.0,  0.0, 1.0]
+
+        publish:
+            path_en: false
+            effect_map_en: false
+            map_en: false
+            scan_publish_en: true
+            dense_publish_en: false
+            scan_bodyframe_pub_en: false
+
+        pcd_save:
+            pcd_save_en: false
+            interval: -1

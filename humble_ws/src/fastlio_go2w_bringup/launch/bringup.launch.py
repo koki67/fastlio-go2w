@@ -39,6 +39,11 @@ def generate_launch_description():
         default_value=os.path.join(pkg, "config", "mid360_go2w.yaml"),
         description="FAST-LIO parameter YAML file.",
     )
+    imu_frame_arg = DeclareLaunchArgument(
+        "imu_frame",
+        default_value="livox_imu_frame",
+        description="IMU frame used by the odometry adapter.",
+    )
 
     robot_description = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -59,6 +64,7 @@ def generate_launch_description():
             "use_sim_time": LaunchConfiguration("use_sim_time"),
             "time_sync_en": LaunchConfiguration("time_sync_en"),
             "config": LaunchConfiguration("config"),
+            "imu_frame": LaunchConfiguration("imu_frame"),
         }.items(),
     )
 
@@ -68,6 +74,7 @@ def generate_launch_description():
         use_sim_time_arg,
         time_sync_arg,
         config_arg,
+        imu_frame_arg,
         robot_description,
         sensors,
         fastlio,

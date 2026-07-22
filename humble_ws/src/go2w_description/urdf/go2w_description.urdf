@@ -720,6 +720,12 @@
     <child link="imu" />
     <axis xyz="0 0 0" />
   </joint>
+  <link name="hesai_lidar" />
+  <joint name="hesai_lidar_joint" type="fixed">
+    <origin xyz="0.1634 0 0.116" rpy="0 0 1.5707963267948966" />
+    <parent link="base_link" />
+    <child link="hesai_lidar" />
+  </joint>
   <link name="radar">
     <inertial>
       <origin xyz="0 0 0" rpy="0 0 0" />

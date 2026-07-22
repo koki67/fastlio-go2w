@@ -36,6 +36,11 @@ def generate_launch_description():
         default_value=fastlio_config,
         description="FAST-LIO parameter YAML file.",
     )
+    imu_frame_arg = DeclareLaunchArgument(
+        "imu_frame",
+        default_value="livox_imu_frame",
+        description="IMU frame used to rebase FAST-LIO body odometry to base_link.",
+    )
 
     fastlio_node = Node(
         package="fast_lio",
@@ -61,7 +66,7 @@ def generate_launch_description():
                 "odom_input_topic": "/Odometry",
                 "odom_output_topic": "/odom",
                 "base_frame": "base_link",
-                "imu_frame": "livox_imu_frame",
+                "imu_frame": LaunchConfiguration("imu_frame"),
                 "camera_init_frame": "camera_init",
                 "odom_frame": "odom",
                 "sensor_frame_retry_sec": 1.0,
@@ -83,6 +88,7 @@ def generate_launch_description():
         use_sim_time_arg,
         time_sync_arg,
         config_arg,
+        imu_frame_arg,
         fastlio_node,
         odom_adapter_node,
         rviz_node,
