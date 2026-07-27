@@ -19,6 +19,8 @@ Options:
   --output DIR        Result directory (default: ${FASTLIO_RESULTS_ROOT}/fastlio/<bag>/...)
   --config YAML       Override tuning while preserving the MID-360 input and
                       headless publisher contract
+  --lidar-format NAME Livox input format: auto, custom-msg, or pointcloud2
+                      (default: auto; explicit values must match metadata)
   --no-analyze        Keep the result bag but skip automatic artifact generation
   --map-voxel-size M  Final map voxel edge length (default: 0.20)
   --preview-max-points N
@@ -45,6 +47,7 @@ RATE="1.0"
 DOMAIN_ID="77"
 OUTPUT_DIR=""
 CONFIG_OVERRIDE=""
+LIDAR_FORMAT_OVERRIDE="auto"
 ANALYZE="true"
 MAP_VOXEL_SIZE="0.20"
 PREVIEW_MAX_POINTS="500000"
@@ -75,6 +78,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --config)
             CONFIG_OVERRIDE="${2:?Error: --config requires a value}"
+            shift 2
+            ;;
+        --lidar-format)
+            LIDAR_FORMAT_OVERRIDE="${2:?Error: --lidar-format requires a value}"
             shift 2
             ;;
         --no-analyze)
@@ -127,14 +134,44 @@ if [ -n "$DURATION" ]; then
         || die "--duration must be greater than zero"
 fi
 [[ "$DOMAIN_ID" =~ ^[0-9]+$ ]] || die "--domain-id must be a non-negative integer"
+case "$LIDAR_FORMAT_OVERRIDE" in
+    auto|custom-msg|pointcloud2) ;;
+    *) die "--lidar-format must be auto, custom-msg, or pointcloud2" ;;
+esac
 
 BAG="$(realpath "$BAG")"
 [ -d "$BAG" ] || die "bag directory not found: $BAG"
 [ -f "$BAG/metadata.yaml" ] || die "bag metadata not found: $BAG/metadata.yaml"
-for topic in /livox/lidar /livox/imu; do
-    grep -Eq "name: ${topic}$" "$BAG/metadata.yaml" \
-        || die "required topic $topic is absent from the bag"
-done
+grep -Eq "name: /livox/imu$" "$BAG/metadata.yaml" \
+    || die "required topic /livox/imu is absent from the bag"
+
+FORMAT_DETECTOR="$REPO_ROOT/scripts/fastlio/detect_livox_bag_format.py"
+[ -f "$FORMAT_DETECTOR" ] || die "Livox bag format detector not found: $FORMAT_DETECTOR"
+if ! DETECTED_LIDAR_FORMAT="$(python3 "$FORMAT_DETECTOR" "$BAG/metadata.yaml")"; then
+    die "could not establish a supported Livox input format"
+fi
+if [ "$LIDAR_FORMAT_OVERRIDE" != "auto" ] && \
+   [ "$LIDAR_FORMAT_OVERRIDE" != "$DETECTED_LIDAR_FORMAT" ]; then
+    die "--lidar-format $LIDAR_FORMAT_OVERRIDE conflicts with metadata format $DETECTED_LIDAR_FORMAT"
+fi
+RESOLVED_LIDAR_FORMAT="$DETECTED_LIDAR_FORMAT"
+case "$RESOLVED_LIDAR_FORMAT" in
+    custom-msg)
+        DETECTED_LIDAR_ROS_TYPE="livox_ros_driver2/msg/CustomMsg"
+        FASTLIO_LID_TOPIC="/livox/lidar"
+        LIVOX_ADAPTER_ENABLED="false"
+        ;;
+    pointcloud2)
+        DETECTED_LIDAR_ROS_TYPE="sensor_msgs/msg/PointCloud2"
+        FASTLIO_LID_TOPIC="/livox/lidar_fastlio"
+        LIVOX_ADAPTER_ENABLED="true"
+        ;;
+esac
+LIVOX_ADAPTER_INPUT_TOPIC="/livox/lidar"
+LIVOX_ADAPTER_OUTPUT_TOPIC="/livox/lidar_fastlio"
+LIVOX_ADAPTER_DIAGNOSTICS_TOPIC="/fastlio_go2w_livox/diagnostics"
+LIVOX_ADAPTER_MAX_DELTA_SEC="0.2"
+LIVOX_ADAPTER_MINIMUM_POINTS="10"
 
 CONFIG_DIR="$REPO_ROOT/humble_ws/src/fastlio_go2w_bringup/config"
 if [ -n "$CONFIG_OVERRIDE" ]; then
@@ -180,6 +217,26 @@ python3 -c 'import yaml' >/dev/null 2>&1 \
 LAUNCH_SOURCE="$REPO_ROOT/humble_ws/src/fastlio_go2w_bringup/launch/offline_fastlio.launch.py"
 [ -f "$LAUNCH_SOURCE" ] || die "experiment launch source not found: $LAUNCH_SOURCE"
 LAUNCH_SHA256="$(sha256sum "$LAUNCH_SOURCE" | awk '{print $1}')"
+GRAPH_SOURCE="$REPO_ROOT/humble_ws/src/fastlio_go2w_bringup/src/fastlio_go2w_bringup/livox_replay.py"
+[ -f "$GRAPH_SOURCE" ] || die "Livox replay graph source not found: $GRAPH_SOURCE"
+GRAPH_SHA256="$(sha256sum "$GRAPH_SOURCE" | awk '{print $1}')"
+
+LIVOX_ADAPTER_SOURCE=""
+LIVOX_ADAPTER_SOURCE_SHA256=""
+DIAGNOSTICS_EXTRACTOR_SOURCE=""
+if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+    LIVOX_ADAPTER_SOURCE="$REPO_ROOT/humble_ws/src/fastlio_go2w_livox"
+    [ -d "$LIVOX_ADAPTER_SOURCE" ] || die "Livox adapter source package not found"
+    LIVOX_ADAPTER_SOURCE_SHA256="$(
+        sha256sum \
+            "$LIVOX_ADAPTER_SOURCE/include/fastlio_go2w_livox/pointcloud_adapter.hpp" \
+            "$LIVOX_ADAPTER_SOURCE/src/pointcloud_adapter.cpp" \
+            "$LIVOX_ADAPTER_SOURCE/src/livox_pointcloud_adapter_node.cpp" | sha256sum | awk '{print $1}'
+    )"
+    DIAGNOSTICS_EXTRACTOR_SOURCE="$SCRIPT_DIR/extract_livox_adapter_diagnostics.py"
+    [ -f "$DIAGNOSTICS_EXTRACTOR_SOURCE" ] \
+        || die "Livox diagnostics extractor not found: $DIAGNOSTICS_EXTRACTOR_SOURCE"
+fi
 
 ANALYZER_SOURCE=""
 if [ "$ANALYZE" = "true" ]; then
@@ -189,20 +246,34 @@ fi
 
 candidate_is_usable() {
     local candidate="$1"
-    local install_root bringup_prefix launch_runtime fastlio_runtime
-    local odom_runtime
+    local install_root bringup_prefix launch_runtime graph_runtime fastlio_runtime
+    local odom_runtime adapter_runtime graph_egg_link graph_python_root
     install_root="$(dirname "$candidate")"
     bringup_prefix="$install_root/fastlio_go2w_bringup"
     launch_runtime="$bringup_prefix/share/fastlio_go2w_bringup/launch/offline_fastlio.launch.py"
+    graph_runtime="$bringup_prefix/lib/python3.10/site-packages/fastlio_go2w_bringup/livox_replay.py"
+    if [ ! -f "$graph_runtime" ]; then
+        graph_egg_link="$bringup_prefix/lib/python3.10/site-packages/fastlio-go2w-bringup.egg-link"
+        [ -f "$graph_egg_link" ] || return 1
+        IFS= read -r graph_python_root < "$graph_egg_link" || return 1
+        graph_runtime="$graph_python_root/fastlio_go2w_bringup/livox_replay.py"
+    fi
     fastlio_runtime="$install_root/fast_lio/lib/fast_lio/fastlio_mapping"
     odom_runtime="$bringup_prefix/lib/fastlio_go2w_bringup/fastlio_odom_adapter"
+    adapter_runtime="$install_root/fastlio_go2w_livox/lib/fastlio_go2w_livox/livox_pointcloud_adapter"
 
     [ -f "$candidate" ] || return 1
     [ -f "$launch_runtime" ] || return 1
+    [ -f "$graph_runtime" ] || return 1
     [ -x "$fastlio_runtime" ] || return 1
     [ -x "$odom_runtime" ] || return 1
     [ "$(sha256sum "$launch_runtime" | awk '{print $1}')" = "$LAUNCH_SHA256" ] \
         || return 1
+    [ "$(sha256sum "$graph_runtime" | awk '{print $1}')" = "$GRAPH_SHA256" ] \
+        || return 1
+    if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+        [ -x "$adapter_runtime" ] || return 1
+    fi
 
     (
         set +u
@@ -212,6 +283,10 @@ candidate_is_usable() {
             || exit 1
         [ "$(ros2 pkg prefix fast_lio 2>/dev/null)" = "$install_root/fast_lio" ] \
             || exit 1
+        if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+            [ "$(ros2 pkg prefix fastlio_go2w_livox 2>/dev/null)" = \
+              "$install_root/fastlio_go2w_livox" ] || exit 1
+        fi
     )
 }
 
@@ -234,10 +309,23 @@ INSTALL_ROOT="$(dirname "$WORKSPACE_SETUP")"
 BRINGUP_PREFIX="$INSTALL_ROOT/fastlio_go2w_bringup"
 LAUNCH_RUNTIME="$BRINGUP_PREFIX/share/fastlio_go2w_bringup/launch/offline_fastlio.launch.py"
 LAUNCH_RUNTIME_SHA256="$(sha256sum "$LAUNCH_RUNTIME" | awk '{print $1}')"
+GRAPH_RUNTIME="$BRINGUP_PREFIX/lib/python3.10/site-packages/fastlio_go2w_bringup/livox_replay.py"
+if [ ! -f "$GRAPH_RUNTIME" ]; then
+    GRAPH_EGG_LINK="$BRINGUP_PREFIX/lib/python3.10/site-packages/fastlio-go2w-bringup.egg-link"
+    IFS= read -r GRAPH_PYTHON_ROOT < "$GRAPH_EGG_LINK"
+    GRAPH_RUNTIME="$GRAPH_PYTHON_ROOT/fastlio_go2w_bringup/livox_replay.py"
+fi
+GRAPH_RUNTIME_SHA256="$(sha256sum "$GRAPH_RUNTIME" | awk '{print $1}')"
 FASTLIO_RUNTIME="$INSTALL_ROOT/fast_lio/lib/fast_lio/fastlio_mapping"
 ODOM_ADAPTER_RUNTIME="$BRINGUP_PREFIX/lib/fastlio_go2w_bringup/fastlio_odom_adapter"
 FASTLIO_RUNTIME_SHA256="$(sha256sum "$FASTLIO_RUNTIME" | awk '{print $1}')"
 ODOM_ADAPTER_RUNTIME_SHA256="$(sha256sum "$ODOM_ADAPTER_RUNTIME" | awk '{print $1}')"
+LIVOX_ADAPTER_RUNTIME=""
+LIVOX_ADAPTER_RUNTIME_SHA256=""
+if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+    LIVOX_ADAPTER_RUNTIME="$INSTALL_ROOT/fastlio_go2w_livox/lib/fastlio_go2w_livox/livox_pointcloud_adapter"
+    LIVOX_ADAPTER_RUNTIME_SHA256="$(sha256sum "$LIVOX_ADAPTER_RUNTIME" | awk '{print $1}')"
+fi
 
 python3 -c 'import rosbag2_py' >/dev/null 2>&1 \
     || die "rosbag2 Python support is required for result validation"
@@ -271,6 +359,18 @@ if [ "$ANALYZE" = "true" ]; then
     ANALYSIS_LOG="$OUTPUT_DIR/analysis.log"
     cp "$ANALYZER_SOURCE" "$ANALYZER_SNAPSHOT"
     ANALYZER_SHA256="$(sha256sum "$ANALYZER_SNAPSHOT" | awk '{print $1}')"
+fi
+LIVOX_ADAPTER_DIAGNOSTICS=""
+LIVOX_ADAPTER_DIAGNOSTICS_SHA256=""
+DIAGNOSTICS_EXTRACTOR_SNAPSHOT=""
+DIAGNOSTICS_EXTRACTOR_SHA256=""
+DIAGNOSTICS_LOG=""
+if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+    LIVOX_ADAPTER_DIAGNOSTICS="$OUTPUT_DIR/livox_adapter_diagnostics.json"
+    DIAGNOSTICS_EXTRACTOR_SNAPSHOT="$OUTPUT_DIR/extract_livox_adapter_diagnostics.py"
+    DIAGNOSTICS_LOG="$OUTPUT_DIR/livox-adapter-diagnostics.log"
+    cp "$DIAGNOSTICS_EXTRACTOR_SOURCE" "$DIAGNOSTICS_EXTRACTOR_SNAPSHOT"
+    DIAGNOSTICS_EXTRACTOR_SHA256="$(sha256sum "$DIAGNOSTICS_EXTRACTOR_SNAPSHOT" | awk '{print $1}')"
 fi
 PARAMETER_DUMP_LOG="$OUTPUT_DIR/parameter-dump.log"
 PARAMETER_VALIDATION_LOG="$OUTPUT_DIR/fastlio-parameter-validation.log"
@@ -321,6 +421,29 @@ write_manifest() {
     EXP_FASTLIO_PARAMETERS="$FASTLIO_PARAMETERS_SNAPSHOT" \
     EXP_FASTLIO_PARAMETERS_SHA="$FASTLIO_PARAMETERS_SHA256" \
     EXP_METADATA_SHA="$METADATA_SHA256" EXP_LAUNCH_SHA="$LAUNCH_SHA256" \
+    EXP_GRAPH_SOURCE="$GRAPH_SOURCE" EXP_GRAPH_SHA="$GRAPH_SHA256" \
+    EXP_GRAPH_RUNTIME="$GRAPH_RUNTIME" EXP_GRAPH_RUNTIME_SHA="$GRAPH_RUNTIME_SHA256" \
+    EXP_LIDAR_ROS_TYPE="$DETECTED_LIDAR_ROS_TYPE" \
+    EXP_DETECTED_LIDAR_FORMAT="$DETECTED_LIDAR_FORMAT" \
+    EXP_RESOLVED_LIDAR_FORMAT="$RESOLVED_LIDAR_FORMAT" \
+    EXP_LIDAR_FORMAT_OVERRIDE="$LIDAR_FORMAT_OVERRIDE" \
+    EXP_FASTLIO_LID_TOPIC="$FASTLIO_LID_TOPIC" \
+    EXP_LIVOX_ADAPTER_ENABLED="$LIVOX_ADAPTER_ENABLED" \
+    EXP_LIVOX_ADAPTER_INPUT_TOPIC="$LIVOX_ADAPTER_INPUT_TOPIC" \
+    EXP_LIVOX_ADAPTER_OUTPUT_TOPIC="$LIVOX_ADAPTER_OUTPUT_TOPIC" \
+    EXP_LIVOX_ADAPTER_DIAGNOSTICS_TOPIC="$LIVOX_ADAPTER_DIAGNOSTICS_TOPIC" \
+    EXP_LIVOX_ADAPTER_MAX_DELTA="$LIVOX_ADAPTER_MAX_DELTA_SEC" \
+    EXP_LIVOX_ADAPTER_MINIMUM_POINTS="$LIVOX_ADAPTER_MINIMUM_POINTS" \
+    EXP_LIVOX_ADAPTER_SOURCE="$LIVOX_ADAPTER_SOURCE" \
+    EXP_LIVOX_ADAPTER_SOURCE_SHA="$LIVOX_ADAPTER_SOURCE_SHA256" \
+    EXP_LIVOX_ADAPTER_RUNTIME="$LIVOX_ADAPTER_RUNTIME" \
+    EXP_LIVOX_ADAPTER_RUNTIME_SHA="$LIVOX_ADAPTER_RUNTIME_SHA256" \
+    EXP_LIVOX_ADAPTER_DIAGNOSTICS="$LIVOX_ADAPTER_DIAGNOSTICS" \
+    EXP_LIVOX_ADAPTER_DIAGNOSTICS_SHA="$LIVOX_ADAPTER_DIAGNOSTICS_SHA256" \
+    EXP_DIAGNOSTICS_EXTRACTOR_SOURCE="$DIAGNOSTICS_EXTRACTOR_SOURCE" \
+    EXP_DIAGNOSTICS_EXTRACTOR_SNAPSHOT="$DIAGNOSTICS_EXTRACTOR_SNAPSHOT" \
+    EXP_DIAGNOSTICS_EXTRACTOR_SHA="$DIAGNOSTICS_EXTRACTOR_SHA256" \
+    EXP_DIAGNOSTICS_LOG="$DIAGNOSTICS_LOG" \
     EXP_GIT_COMMIT="$GIT_COMMIT" EXP_OUTPUT="$OUTPUT_DIR" \
     EXP_WORKSPACE_SETUP="$WORKSPACE_SETUP" \
     EXP_LAUNCH_SOURCE="$LAUNCH_SOURCE" EXP_LAUNCH_RUNTIME="$LAUNCH_RUNTIME" \
@@ -401,6 +524,33 @@ if analysis_enabled:
         }
     )
 
+adapter_enabled = env["EXP_LIVOX_ADAPTER_ENABLED"] == "true"
+adapter_diagnostics = None
+adapter_diagnostics_path = env.get("EXP_LIVOX_ADAPTER_DIAGNOSTICS", "")
+if adapter_diagnostics_path and pathlib.Path(adapter_diagnostics_path).is_file():
+    try:
+        adapter_diagnostics = json.loads(
+            pathlib.Path(adapter_diagnostics_path).read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as error:
+        adapter_diagnostics = {"read_error": str(error)}
+
+runtime_executables = {
+    "fastlio": {
+        "path": env["EXP_FASTLIO_RUNTIME"],
+        "sha256": env["EXP_FASTLIO_RUNTIME_SHA"],
+    },
+    "odom_adapter": {
+        "path": env["EXP_ODOM_RUNTIME"],
+        "sha256": env["EXP_ODOM_RUNTIME_SHA"],
+    },
+}
+if adapter_enabled:
+    runtime_executables["livox_adapter"] = {
+        "path": env["EXP_LIVOX_ADAPTER_RUNTIME"],
+        "sha256": env["EXP_LIVOX_ADAPTER_RUNTIME_SHA"],
+    }
+
 run_logs = [
     "launch.log",
     "recorder.log",
@@ -414,6 +564,8 @@ run_logs = [
 ]
 if analysis_enabled:
     run_logs.append(optional_name(env["EXP_ANALYSIS_LOG"]))
+if adapter_enabled:
+    run_logs.append(optional_name(env["EXP_DIAGNOSTICS_LOG"]))
 
 
 document = {
@@ -424,6 +576,9 @@ document = {
     "bag": {
         "path": env["EXP_BAG"],
         "metadata_sha256": env["EXP_METADATA_SHA"],
+        "lidar_topic": "/livox/lidar",
+        "lidar_ros_type": env["EXP_LIDAR_ROS_TYPE"],
+        "detected_lidar_format": env["EXP_DETECTED_LIDAR_FORMAT"],
     },
     "profile": "baseline",
     "playback": {
@@ -449,6 +604,7 @@ document = {
         "config_sha256": env["EXP_CONFIG_SHA"],
         "parameters_snapshot": pathlib.Path(env["EXP_FASTLIO_PARAMETERS"]).name,
         "parameters_sha256": env.get("EXP_FASTLIO_PARAMETERS_SHA") or None,
+        "lid_topic": env["EXP_FASTLIO_LID_TOPIC"],
         "map_en": False,
         "path_en": False,
         "effect_map_en": False,
@@ -457,6 +613,40 @@ document = {
         "dense_publish_en": False,
         "pcd_save_en": False,
         "runtime_pos_log_enable": False,
+    },
+    "livox_input": {
+        "format_override": env["EXP_LIDAR_FORMAT_OVERRIDE"],
+        "detected_format": env["EXP_DETECTED_LIDAR_FORMAT"],
+        "resolved_format": env["EXP_RESOLVED_LIDAR_FORMAT"],
+        "ros_type": env["EXP_LIDAR_ROS_TYPE"],
+    },
+    "livox_adapter": {
+        "enabled": adapter_enabled,
+        "input_topic": env["EXP_LIVOX_ADAPTER_INPUT_TOPIC"] if adapter_enabled else None,
+        "output_topic": env["EXP_LIVOX_ADAPTER_OUTPUT_TOPIC"] if adapter_enabled else None,
+        "diagnostics_topic": (
+            env["EXP_LIVOX_ADAPTER_DIAGNOSTICS_TOPIC"] if adapter_enabled else None
+        ),
+        "config": (
+            {
+                "max_point_header_delta_sec": float(env["EXP_LIVOX_ADAPTER_MAX_DELTA"]),
+                "minimum_points": int(env["EXP_LIVOX_ADAPTER_MINIMUM_POINTS"]),
+            }
+            if adapter_enabled
+            else None
+        ),
+        "source": env.get("EXP_LIVOX_ADAPTER_SOURCE") or None,
+        "source_sha256": env.get("EXP_LIVOX_ADAPTER_SOURCE_SHA") or None,
+        "runtime": env.get("EXP_LIVOX_ADAPTER_RUNTIME") or None,
+        "runtime_sha256": env.get("EXP_LIVOX_ADAPTER_RUNTIME_SHA") or None,
+        "diagnostics_path": optional_name(adapter_diagnostics_path),
+        "diagnostics_sha256": env.get("EXP_LIVOX_ADAPTER_DIAGNOSTICS_SHA") or None,
+        "diagnostics": adapter_diagnostics,
+        "extractor_source": env.get("EXP_DIAGNOSTICS_EXTRACTOR_SOURCE") or None,
+        "extractor_snapshot": optional_name(
+            env.get("EXP_DIAGNOSTICS_EXTRACTOR_SNAPSHOT", "")
+        ),
+        "extractor_sha256": env.get("EXP_DIAGNOSTICS_EXTRACTOR_SHA") or None,
     },
     "analysis": analysis_details,
     "git": {
@@ -467,16 +657,13 @@ document = {
     "launch_sha256": env["EXP_LAUNCH_SHA"],
     "launch_source": env["EXP_LAUNCH_SOURCE"],
     "launch_runtime": env["EXP_LAUNCH_RUNTIME"],
-    "runtime_executables": {
-        "fastlio": {
-            "path": env["EXP_FASTLIO_RUNTIME"],
-            "sha256": env["EXP_FASTLIO_RUNTIME_SHA"],
-        },
-        "odom_adapter": {
-            "path": env["EXP_ODOM_RUNTIME"],
-            "sha256": env["EXP_ODOM_RUNTIME_SHA"],
-        },
+    "livox_graph": {
+        "source": env["EXP_GRAPH_SOURCE"],
+        "source_sha256": env["EXP_GRAPH_SHA"],
+        "runtime": env["EXP_GRAPH_RUNTIME"],
+        "runtime_sha256": env["EXP_GRAPH_RUNTIME_SHA"],
     },
+    "runtime_executables": runtime_executables,
     "process_ids": {
         "launch": optional_int(env["EXP_LAUNCH_PID"]),
         "recorder": optional_int(env["EXP_RECORDER_PID"]),
@@ -492,6 +679,10 @@ document = {
         "resource_summary_sha256": env.get("EXP_RESOURCE_SUMMARY_SHA") or None,
         "commands": "commands.log",
         "logs": run_logs,
+        "livox_adapter_diagnostics": optional_name(adapter_diagnostics_path),
+        "livox_adapter_diagnostics_sha256": (
+            env.get("EXP_LIVOX_ADAPTER_DIAGNOSTICS_SHA") or None
+        ),
     },
 }
 path = pathlib.Path(sys.argv[1])
@@ -616,11 +807,45 @@ wait_for_topic() {
     return 1
 }
 
+wait_for_topic_type() {
+    local topic="$1"
+    local expected_type="$2"
+    local minimum_publishers="$3"
+    local minimum_subscribers="$4"
+    local deadline=$((SECONDS + 90))
+    local info actual_type publishers subscribers
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        kill -0 "$LAUNCH_PID" 2>/dev/null || return 1
+        kill -0 "$RECORDER_PID" 2>/dev/null || return 1
+        kill -0 "$PLAYER_PID" 2>/dev/null || return 1
+        info="$(ros2 topic info --no-daemon -v "$topic" 2>/dev/null || true)"
+        actual_type="$(awk '/^Type:/{print $2; exit}' <<<"$info")"
+        publishers="$(awk '/^Publisher count:/{print $3; exit}' <<<"$info")"
+        subscribers="$(awk '/^Subscription count:/{print $3; exit}' <<<"$info")"
+        if [ "$actual_type" = "$expected_type" ] \
+            && [ "${publishers:-0}" -ge "$minimum_publishers" ] \
+            && [ "${subscribers:-0}" -ge "$minimum_subscribers" ]; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    return 1
+}
+
 assert_fastlio_parameter() {
     local name="$1"
     local expected="$2"
-    local actual
-    if ! actual="$(ros2 param get --no-daemon --hide-type /fastlio_mapping "$name")"; then
+    local actual=""
+    local deadline=$((SECONDS + 10))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        kill -0 "$LAUNCH_PID" 2>/dev/null || break
+        if actual="$(ros2 param get --no-daemon --hide-type /fastlio_mapping "$name" 2>/dev/null)"; then
+            break
+        fi
+        actual=""
+        sleep 0.2
+    done
+    if [ -z "$actual" ]; then
         echo "Could not read FAST-LIO parameter $name." >&2
         return 1
     fi
@@ -631,7 +856,7 @@ assert_fastlio_parameter() {
 }
 
 validate_fastlio_parameters() {
-    assert_fastlio_parameter common.lid_topic /livox/lidar || return 1
+    assert_fastlio_parameter common.lid_topic "$FASTLIO_LID_TOPIC" || return 1
     assert_fastlio_parameter preprocess.scan_line 4 || return 1
     assert_fastlio_parameter publish.map_en False || return 1
     assert_fastlio_parameter publish.path_en False || return 1
@@ -649,6 +874,9 @@ required_processing_nodes_alive() {
     for node in /fastlio_mapping /fastlio_odom_adapter; do
         grep -Fxq "$node" <<<"$nodes" || return 1
     done
+    if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+        grep -Fxq /livox_pointcloud_adapter <<<"$nodes" || return 1
+    fi
     return 0
 }
 
@@ -768,7 +996,7 @@ validate_result_bag() {
     ros2 bag info "$RESULT_BAG"
     echo
     echo "metadata and reader validation:"
-    python3 - "$RESULT_BAG" <<'PY'
+    python3 - "$RESULT_BAG" "$LIVOX_ADAPTER_ENABLED" <<'PY'
 from pathlib import Path
 import json
 import sys
@@ -777,6 +1005,7 @@ import rosbag2_py
 import yaml
 
 root = Path(sys.argv[1]).resolve()
+adapter_enabled = sys.argv[2] == "true"
 metadata_path = root / "metadata.yaml"
 
 try:
@@ -849,6 +1078,8 @@ if total_count != sum(counts.values()):
     )
 
 required = ["/odom", "/Odometry", "/cloud_registered"]
+if adapter_enabled:
+    required.append("/fastlio_go2w_livox/diagnostics")
 missing = [name for name in required if counts.get(name, 0) <= 0]
 if missing:
     raise SystemExit(
@@ -895,7 +1126,7 @@ PY
 }
 
 validate_resource_artifacts() {
-    python3 - "$METRICS_CSV" "$METRICS_SUMMARY" <<'PY'
+    python3 - "$METRICS_CSV" "$METRICS_SUMMARY" "$LIVOX_ADAPTER_ENABLED" <<'PY'
 from collections import Counter
 from pathlib import Path
 import csv
@@ -905,6 +1136,8 @@ import sys
 csv_path = Path(sys.argv[1])
 summary_path = Path(sys.argv[2])
 required = {"fastlio", "player", "recorder"}
+if sys.argv[3] == "true":
+    required.add("livox_adapter")
 
 if not csv_path.is_file() or csv_path.stat().st_size <= 0:
     raise SystemExit(f"resource metrics CSV is missing or empty: {csv_path}")
@@ -998,8 +1231,12 @@ PY
 LAUNCH_CMD=(
     ros2 launch fastlio_go2w_bringup offline_fastlio.launch.py
     "config:=$FASTLIO_CONFIG_SNAPSHOT"
+    "lidar_format:=$RESOLVED_LIDAR_FORMAT"
 )
 RECORD_TOPICS=(/odom /Odometry /cloud_registered)
+if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+    RECORD_TOPICS+=("$LIVOX_ADAPTER_DIAGNOSTICS_TOPIC")
+fi
 RECORDER_CMD=(ros2 bag record --use-sim-time -o "$RESULT_BAG" "${RECORD_TOPICS[@]}")
 PLAYER_CMD=(
     ros2 bag play "$BAG" --clock --rate "$RATE" --start-paused
@@ -1017,12 +1254,23 @@ if [ "$ANALYZE" = "true" ]; then
         --plane-random-seed "$PLANE_RANDOM_SEED"
     )
 fi
+DIAGNOSTICS_CMD=()
+if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+    DIAGNOSTICS_CMD=(
+        python3 "$DIAGNOSTICS_EXTRACTOR_SNAPSHOT" "$RESULT_BAG"
+        --output "$LIVOX_ADAPTER_DIAGNOSTICS"
+        --topic "$LIVOX_ADAPTER_DIAGNOSTICS_TOPIC"
+    )
+fi
 {
     printf 'launch:'; printf ' %q' "${LAUNCH_CMD[@]}"; printf '\n'
     printf 'record:'; printf ' %q' "${RECORDER_CMD[@]}"; printf '\n'
     printf 'play:'; printf ' %q' "${PLAYER_CMD[@]}"; printf '\n'
     if [ "$ANALYZE" = "true" ]; then
         printf 'analyze:'; printf ' %q' "${ANALYZE_CMD[@]}"; printf '\n'
+    fi
+    if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+        printf 'diagnostics:'; printf ' %q' "${DIAGNOSTICS_CMD[@]}"; printf '\n'
     fi
 } > "$OUTPUT_DIR/commands.log"
 
@@ -1031,6 +1279,9 @@ write_manifest "starting"
 echo "Starting headless FAST-LIO in ROS domain $ROS_DOMAIN_ID"
 echo "Bag: $BAG"
 echo "Output: $OUTPUT_DIR"
+echo "Livox metadata type: $DETECTED_LIDAR_ROS_TYPE"
+echo "Resolved Livox format: $RESOLVED_LIDAR_FORMAT"
+echo "Livox adapter enabled: $LIVOX_ADAPTER_ENABLED"
 
 setsid "${LAUNCH_CMD[@]}" > "$OUTPUT_DIR/launch.log" 2>&1 &
 LAUNCH_PID=$!
@@ -1041,6 +1292,10 @@ PLAYER_PID=$!
 
 wait_for_node /fastlio_mapping || die "FAST-LIO did not become ready; see launch.log"
 wait_for_node /fastlio_odom_adapter || die "odom adapter did not become ready; see launch.log"
+if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+    wait_for_node /livox_pointcloud_adapter \
+        || die "Livox adapter did not become ready; see launch.log"
+fi
 ros2 param dump --no-daemon --output-dir "$OUTPUT_DIR" /fastlio_mapping \
     > "$PARAMETER_DUMP_LOG" 2>&1
 [ -s "$FASTLIO_PARAMETERS_SNAPSHOT" ] \
@@ -1054,7 +1309,15 @@ validate_fastlio_parameters \
 FASTLIO_PARAMETERS_SHA256="$(sha256sum "$FASTLIO_PARAMETERS_SNAPSHOT" | awk '{print $1}')"
 wait_for_service /rosbag2_player/resume || die "rosbag player resume service did not appear"
 
-wait_for_topic /livox/lidar 1 1 || die "/livox/lidar endpoints did not become ready"
+wait_for_topic_type /livox/lidar "$DETECTED_LIDAR_ROS_TYPE" 1 1 \
+    || die "/livox/lidar endpoints did not become ready with type $DETECTED_LIDAR_ROS_TYPE"
+if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+    wait_for_topic_type /livox/lidar_fastlio livox_ros_driver2/msg/CustomMsg 1 1 \
+        || die "/livox/lidar_fastlio CustomMsg endpoints did not become ready"
+    wait_for_topic_type "$LIVOX_ADAPTER_DIAGNOSTICS_TOPIC" \
+        diagnostic_msgs/msg/DiagnosticArray 1 1 \
+        || die "Livox adapter diagnostics endpoints did not become ready"
+fi
 wait_for_topic /livox/imu 1 1 || die "/livox/imu endpoints did not become ready"
 wait_for_topic /Odometry 1 1 || die "/Odometry endpoints did not become ready"
 wait_for_topic /odom 1 1 || die "/odom endpoints did not become ready"
@@ -1068,6 +1331,9 @@ SAMPLER_CMD=(
     --output "$METRICS_CSV" --summary "$METRICS_SUMMARY"
     --stop-file "$STOP_FILE" --interval 1.0
 )
+if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+    SAMPLER_CMD+=(--target "livox_adapter:$LAUNCH_PID:livox_pointcloud_adapter")
+fi
 setsid "${SAMPLER_CMD[@]}" > "$OUTPUT_DIR/metrics.log" 2>&1 &
 SAMPLER_PID=$!
 
@@ -1141,6 +1407,18 @@ if ! validate_result_bag > "$RESULT_BAG_VALIDATION_LOG" 2>&1; then
     die "finalized result bag validation failed; see $RESULT_BAG_VALIDATION_LOG"
 fi
 RESULT_METADATA_SHA256="$(sha256sum "$RESULT_BAG/metadata.yaml" | awk '{print $1}')"
+
+if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+    if ! "${DIAGNOSTICS_CMD[@]}" > "$DIAGNOSTICS_LOG" 2>&1; then
+        tail -n 40 "$DIAGNOSTICS_LOG" >&2 || true
+        die "Livox adapter diagnostics extraction failed"
+    fi
+    [ -s "$LIVOX_ADAPTER_DIAGNOSTICS" ] \
+        || die "Livox adapter diagnostics artifact was not created"
+    LIVOX_ADAPTER_DIAGNOSTICS_SHA256="$(
+        sha256sum "$LIVOX_ADAPTER_DIAGNOSTICS" | awk '{print $1}'
+    )"
+fi
 
 if ! validate_resource_artifacts > "$RESOURCE_VALIDATION_LOG" 2>&1; then
     tail -n 40 "$RESOURCE_VALIDATION_LOG" >&2 || true

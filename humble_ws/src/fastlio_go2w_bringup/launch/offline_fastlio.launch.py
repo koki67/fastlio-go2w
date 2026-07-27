@@ -12,6 +12,9 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+from fastlio_go2w_bringup.livox_replay import resolve_livox_replay_graph
 
 
 def _processing_nodes(context, package_share):
@@ -26,7 +29,28 @@ def _processing_nodes(context, package_share):
             "Rebuild the selected workspace overlay."
         )
 
-    return [
+    graph = resolve_livox_replay_graph(
+        LaunchConfiguration("lidar_format").perform(context)
+    )
+    actions = []
+    if graph.adapter_enabled:
+        actions.append(
+            Node(
+                package="fastlio_go2w_livox",
+                executable="livox_pointcloud_adapter",
+                name="livox_pointcloud_adapter",
+                output="screen",
+                parameters=[
+                    {
+                        "use_sim_time": True,
+                        "input_topic": graph.input_topic,
+                        "output_topic": graph.fastlio_topic,
+                        "diagnostics_topic": graph.diagnostics_topic,
+                    }
+                ],
+            )
+        )
+    actions.append(
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(package_share, "launch", "bringup.launch.py")
@@ -37,9 +61,11 @@ def _processing_nodes(context, package_share):
                 "use_sim_time": "true",
                 "time_sync_en": "false",
                 "config": config_path,
+                "lid_topic_override": graph.fastlio_topic,
             }.items(),
         )
-    ]
+    )
+    return actions
 
 
 def generate_launch_description():
@@ -51,6 +77,11 @@ def generate_launch_description():
                 "config",
                 default_value="",
                 description="Optional headless FAST-LIO YAML override.",
+            ),
+            DeclareLaunchArgument(
+                "lidar_format",
+                default_value="custom-msg",
+                description="Resolved Livox input format: custom-msg or pointcloud2.",
             ),
             OpaqueFunction(
                 function=_processing_nodes,
