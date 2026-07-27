@@ -39,6 +39,11 @@ def generate_launch_description():
         default_value=os.path.join(pkg, "config", "mid360_go2w.yaml"),
         description="FAST-LIO parameter YAML file.",
     )
+    lid_topic_override_arg = DeclareLaunchArgument(
+        "lid_topic_override",
+        default_value="",
+        description="Override only FAST-LIO common.lid_topic.",
+    )
 
     robot_description = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -59,6 +64,7 @@ def generate_launch_description():
             "use_sim_time": LaunchConfiguration("use_sim_time"),
             "time_sync_en": LaunchConfiguration("time_sync_en"),
             "config": LaunchConfiguration("config"),
+            "lid_topic_override": LaunchConfiguration("lid_topic_override"),
         }.items(),
     )
 
@@ -68,6 +74,7 @@ def generate_launch_description():
         use_sim_time_arg,
         time_sync_arg,
         config_arg,
+        lid_topic_override_arg,
         robot_description,
         sensors,
         fastlio,

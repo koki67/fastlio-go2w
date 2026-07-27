@@ -12,8 +12,10 @@ The source bag is read-only. The processing run consumes only /livox/lidar and
 
 ~~~text
 raw MID-360 bag
-  /livox/lidar + /livox/imu
+  /livox/lidar (CustomMsg or PointCloud2) + /livox/imu
         |
+        | metadata type detection
+        | PointCloud2 only: adapter -> /livox/lidar_fastlio CustomMsg
         | scripts/offline/run_fastlio_offline.sh
         | FAST-LIO + odom adapter + result recording + resource sampling
         v
@@ -90,6 +92,7 @@ Useful options are:
 | --rate RATE | Source playback multiplier; default 1.0 |
 | --domain-id ID | Isolated ROS domain; default 77 |
 | --config YAML | Explicit compatible headless FAST-LIO configuration |
+| --lidar-format auto\|custom-msg\|pointcloud2 | Auto-detect or assert the exact metadata type; default auto |
 | --no-analyze | Keep the result bag without immediately generating PCD/CSV artifacts |
 | --map-voxel-size M | Final map voxel edge; default 0.20 m |
 | --preview-max-points N | RViz preview point cap; default 500000 |
@@ -114,7 +117,7 @@ It keeps scan_publish_en enabled because /cloud_registered is the source of the
 final map. The built-in PCD writer remains disabled. The runner validates the
 live parameters before playback, including:
 
-- common.lid_topic is /livox/lidar
+- common.lid_topic is `/livox/lidar` for CustomMsg or `/livox/lidar_fastlio` for PointCloud2
 - preprocess.scan_line is 4
 - cumulative map, path, effect-map, and body-frame publishers are disabled
 - registered-cloud output is enabled
@@ -124,6 +127,23 @@ A custom configuration supplied with --config must preserve this input and
 output contract. The selected YAML, live parameter dump, launch source hash,
 runtime executable hashes, source-bag metadata hash, and Git revision are saved
 with each run.
+
+The runner accepts exactly `livox_ros_driver2/msg/CustomMsg` and
+`sensor_msgs/msg/PointCloud2` on `/livox/lidar`. It rejects a missing topic,
+zero messages, unsupported or multiple types, malformed metadata, and an
+explicit format that contradicts metadata before creating the output
+directory. Readiness checks verify endpoint types as well as counts.
+
+CustomMsg keeps the legacy processing graph. PointCloud2 starts
+`fastlio_go2w_livox`, keeps the source on `/livox/lidar`, and publishes the
+normalized CustomMsg on `/livox/lidar_fastlio`; the graph never exposes two
+types on one topic. Only `common.lid_topic` is overridden, so all other values
+from `--config` remain authoritative.
+
+Direct `lidar_type=4` processing is intentionally not used. The existing
+FAST-LIO PointCloud2 handler does not read this Livox producer's absolute
+`timestamp` field and expects a different reflectivity schema. The boundary
+adapter instead reconstructs the existing Livox CustomMsg time contract.
 
 ## Generated artifacts
 
@@ -144,6 +164,8 @@ Analysis is enabled by default. A successful run contains at least:
 | map_preview.pcd | Deterministic bounded-size map used by RViz |
 | summary.json | Trajectory, map, resource, provenance, and artifact hashes |
 | analysis.log | Analyzer output or error details |
+| livox_adapter_diagnostics.json | PointCloud2-only final conversion, drop, reorder, quantization, and scan-width counters |
+| extract_livox_adapter_diagnostics.py | PointCloud2-only frozen diagnostics extractor |
 
 The analyzer preserves the frame IDs found in the recorded data. It rejects
 mixed nonempty cloud frames. The viewer uses the `/odom` trajectory for the
@@ -154,6 +176,19 @@ map_voxelized.pcd contains x, y, z, and count; count is the number of registered
 points accumulated into each voxel. Voxel keys are sorted before writing,
 preview points are selected at stable indexes, and local-plane sampling uses
 the configured random seed.
+
+`manifest.json` records the detected ROS type, requested and resolved format,
+FAST-LIO input topic, whether the adapter was enabled, adapter configuration,
+source/runtime hashes, and diagnostics artifact/hash. A legacy CustomMsg run
+stores `enabled: false` and null adapter artifacts without changing the
+existing result-bag contract.
+
+The current Livox PointCloud2 uses epoch-scale absolute nanoseconds in a
+FLOAT64 field. At that magnitude the ULP is 256 ns. The adapter clamps only a
+negative first-point delta no larger than half the observed ULP to zero and
+counts it as quantization clamping; a larger negative delta remains a critical
+frame drop. All valid frames are stable-sorted by rounded timestamp before
+CustomMsg publication.
 
 ## Visualize a completed result
 
@@ -225,13 +260,19 @@ parameters before reporting trajectory differences and resource metrics.
 Without ground truth, those differences are consistency diagnostics rather
 than absolute trajectory error.
 
+Likewise, nonzero finite `/cloud_registered`, `/Odometry`, and `/odom` output
+proves that the software path ran, not that trajectory quality, Jetson
+performance, live hardware, or physical operation is qualified. XT16 remains
+outside this MID-360 dual-format workflow.
+
 ## Troubleshooting
 
 ### The runner reports a stale workspace
 
-Rebuild the Humble workspace. The runner requires the installed launch file to
-match the source file byte-for-byte and checks that the FAST-LIO and odom
-adapter executables exist in the same overlay.
+Rebuild the Humble workspace. The runner requires the installed launch and
+shared Livox graph files to match their sources byte-for-byte. PointCloud2 runs
+also require the Livox adapter executable in that same overlay; all runs check
+the FAST-LIO and odom adapter executables.
 
 ### The output directory is not empty
 
