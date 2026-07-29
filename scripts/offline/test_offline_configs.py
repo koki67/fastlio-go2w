@@ -78,7 +78,9 @@ def test_xt16_fastlio_contract_and_extrinsics_match_calibration():
         'timestamp_unit': 0,
         'scan_rate': 10,
     }
-    assert parameters['point_filter_num'] == 4
+    # Timestamp-sorted XT16 points must not be index-stride filtered because
+    # the stride aliases with the sensor firing/ring order.
+    assert parameters['point_filter_num'] == 1
     assert parameters['mapping']['fov_degree'] == 360.0
     assert parameters['mapping']['det_range'] == 100.0
     assert parameters['mapping']['extrinsic_est_en'] is False

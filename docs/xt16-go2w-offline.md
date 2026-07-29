@@ -44,9 +44,22 @@ are copied from the D-LIO Go2W mounting configuration:
 - hesai_lidar to imu for FAST-LIO: translation `[0.18897, 0, 0.07368]`, Z +90 degrees
 
 `xt16_go2w_accuracy_offline.yaml` uses 16 lines, 10 Hz, relative seconds,
-`point_filter_num: 4`, 0.5 m blind range, 360 degree FOV, 100 m detection
-range, and fixed extrinsics. IMU noise values are initial references copied
-from the D-LIO sensor file, not measured FAST-LIO tuning values.
+`point_filter_num: 1`, a 0.2 m spatial surface voxel, 0.5 m blind range,
+360 degree FOV, 100 m detection range, and fixed extrinsics. The adapter emits
+points in timestamp order. A larger index stride aliases with the XT16 firing
+and ring order, so index-stride filtering is disabled and spatial voxel
+filtering performs the scan downsampling. IMU noise values are initial
+references copied from the D-LIO sensor file, not measured FAST-LIO tuning
+values.
+
+The 2026-07-29 comparison on `experiment_fixed-test_20260728_080342` confirmed
+this requirement over the first 700 seconds. The former four-point stride
+diverged with 3,810 translation jumps over 1 m. Retaining every input point
+produced zero translation jumps and zero `No Effective Points` or voxel-index
+overflow messages. A larger 0.4 m surface voxel also avoided divergence and
+reduced resource use, but increased output gaps and orientation-threshold
+crossings, so the 0.2 m surface voxel remains the accuracy profile default.
+See `docs/validation/2026-07-29-xt16-point-filter.md` for the full comparison.
 
 ## Run one bag
 

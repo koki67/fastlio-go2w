@@ -1,7 +1,10 @@
 /**:
     ros__parameters:
         feature_extract_enable: false
-        point_filter_num: 4
+        # The adapter emits timestamp-sorted XT16 points. Index-stride filtering
+        # aliases with the firing/ring order, so retain every ring here and use
+        # the spatial surface voxel filter below for downsampling.
+        point_filter_num: 1
         max_iteration: 3
         filter_size_surf: 0.2
         filter_size_map: 0.2
