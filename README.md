@@ -37,7 +37,9 @@ fastlio-go2w/
 │   ├── FAST_LIO/                 (submodule, a.k.a. FAST-LIO2 ROS2)
 │   ├── livox_ros_driver2/         (submodule)
 │   ├── go2w_description/          (vendored from frontier-fw-go2w)
-│   └── fastlio_go2w_bringup/      (launch + adapter + configs)
+│   ├── fastlio_go2w_bringup/      (launch + odometry adapter + configs)
+│   ├── fastlio_go2w_livox/        (PointCloud2-to-CustomMsg replay adapter)
+│   └── fastlio_go2w_fusion/       (experimental MID-360 + XT16 fusion)
 ├── scripts/
 │   ├── setup_ws.sh
 │   ├── build_ws.sh
@@ -47,7 +49,11 @@ fastlio-go2w/
 │   │   ├── replay.sh
 │   │   └── live_rviz.sh
 │   └── offline/
+│       ├── run_fastlio_offline.sh
 │       ├── run_multilidar_experiment.sh
+│       ├── publish_offline_frame_alignment.py
+│       ├── replay_fastlio_artifacts.py
+│       ├── visualize_fastlio_run.sh
 │       └── visualize_multilidar_run.sh
 └── catmux/
     ├── fastlio.yaml
@@ -166,24 +172,6 @@ For replaying a saved bag:
 bash scripts/fastlio/replay.sh bags/raw_YYYYMMDD_HHMMSS
 ```
 
-For the Issue #7 offline odometry comparison, run the same bag once with each
-profile. Each command starts FAST-LIO, RViz, and bag playback together:
-
-```bash
-BAG=/mnt/go2w-experiment-recorder/bags/experiment_long3_20260714_014823
-bash scripts/fastlio/replay.sh "$BAG" --profile baseline
-bash scripts/fastlio/replay.sh "$BAG" --profile fused-high
-bash scripts/fastlio/replay.sh "$BAG" --profile fused-matched
-```
-
-`baseline` uses only the MID-360 input. `fused-high` adds a high-density Pandar
-XT16 sample to the MID-360 cloud and has the highest point count.
-`fused-matched` uses stronger input downsampling; it is the density-matched
-profile used by the controlled experiment documented below. The interactive
-replay profiles automatically select visualization-enabled FAST-LIO YAMLs, so
-`--config` is not needed for this visual comparison. Stop each run with Ctrl-C
-before starting the next one.
-
 The devcontainer mounts the external bag directories as read-only and the
 offline result directory as read-write:
 
@@ -201,15 +189,65 @@ bash scripts/fastlio/replay.sh /mnt/go2w-experiment-recorder/bags/raw_YYYYMMDD_H
 bash scripts/fastlio/replay.sh /mnt/fastlio-go2w/bags/raw_YYYYMMDD_HHMMSS
 ```
 
+Replay reads `/livox/lidar` from `metadata.yaml` before starting ROS and prints
+the resolved format. Two exact input types are supported:
+
+| Recorded type | Resolved format | Processing path |
+| --- | --- | --- |
+| `livox_ros_driver2/msg/CustomMsg` | `custom-msg` | Existing FAST-LIO Livox callback, no adapter |
+| `sensor_msgs/msg/PointCloud2` | `pointcloud2` | `/livox/lidar` -> Livox adapter -> `/livox/lidar_fastlio` CustomMsg |
+
+The default `--lidar-format auto` is fail-closed for missing, empty,
+unsupported, or multi-type metadata. An explicit value is useful for operator
+verification, but it must agree with metadata:
+
+```bash
+bash scripts/fastlio/replay.sh "$BAG" --lidar-format pointcloud2
+```
+
+The adapter reads the Livox field schema and per-point absolute nanosecond
+timestamp; it does not assume the current 26-byte stride. Epoch-scale FLOAT64
+timestamps have a 256 ns ULP in the current bags, so a first-point negative
+delta no larger than half an ULP is diagnosed and clamped to zero. Larger
+negative deltas and all other schema, layout, range, or finite-value anomalies
+drop the complete frame.
+
+The PointCloud2 bag is not sent directly to FAST-LIO as `lidar_type=4`: that
+handler does not consume this producer's `timestamp` contract and expects a
+different reflectivity field. XT16 and multi-LiDAR integration remain isolated
+behind the explicit experimental profiles described below; the default
+`legacy` profile remains MID-360-only.
+
+This branch additionally provides three controlled replay profiles:
+
+| Profile | Processing input |
+| --- | --- |
+| `baseline` | MID-360 only |
+| `fused-high` | MID-360 + Pandar XT16, higher retained density |
+| `fused-matched` | MID-360 + Pandar XT16, density-matched sampling |
+
+The fused profiles transform the XT16 points into the MID-360 frame and publish
+one Livox-style cloud on `/livox/lidar_fused` before FAST-LIO. They do not
+modify FAST-LIO into a native multi-sensor estimator. Run the same bag with
+each profile for an interactive comparison:
+
+```bash
+BAG=/mnt/go2w-experiment-recorder/bags/experiment_long3_20260714_014823
+bash scripts/fastlio/replay.sh "$BAG" --profile baseline
+bash scripts/fastlio/replay.sh "$BAG" --profile fused-high
+bash scripts/fastlio/replay.sh "$BAG" --profile fused-matched
+```
+
+The metadata-based `--lidar-format` selection applies to the MID-360 input in
+all profiles. In a fused profile, a PointCloud2 MID-360 bag is adapted first,
+then combined with `/points_raw` from the XT16. `--debug-cloud` enables the
+source-labelled fused debug cloud.
+
 After pulling this configuration change, use **Dev Containers: Rebuild and
 Reopen in Container** once to apply the new mount.
 
 To replay with a specific FAST-LIO parameter YAML, pass `--config`.
-Without `--config`, each profile selects the following default:
-
-- `legacy`: `mid360_go2w.yaml`
-- `baseline`: `mid360_go2w_accuracy_dense_false.yaml`
-- `fused-high` / `fused-matched`: `mid360_xt16_fused_accuracy_dense_false.yaml`
+Without `--config`, replay uses `mid360_go2w.yaml`.
 
 ```bash
 bash scripts/fastlio/replay.sh bags/raw_YYYYMMDD_HHMMSS --config mid360_go2w_accuracy.yaml
@@ -220,38 +258,89 @@ bash scripts/fastlio/replay.sh bags/raw_YYYYMMDD_HHMMSS --config humble_ws/src/f
 or repository root, or a file name under
 `humble_ws/src/fastlio_go2w_bringup/config/`.
 
-The option is a complete FAST-LIO parameter override; it does not select the
-RViz layout. For a fused profile, start from
-`mid360_xt16_fused_accuracy_dense_false.yaml` so that `common.lid_topic`
-remains `/livox/lidar_fused` and `preprocess.scan_line`
-remains `20`. The MID-360 visualization configs subscribe to `/livox/lidar`
-and therefore intentionally run MID-360-only processing even if a fused
-profile starts the fusion node.
-
-RViz is enabled by default for replay. Add `--no-rviz` if you need headless
-replay. All replay defaults set `publish.map_en: true`, and the bundled RViz
-layout enables `/Laser_map`, so the accumulated lower-density FAST-LIO map is
-visible in the same way as on the main branch.
+RViz is enabled by default for replay. Add `--no-rviz` if you need headless replay.
 
 ## Headless offline processing and saved results
 
-The offline workflow separates computation from visualization. During the
-bounded playback of an existing sensor bag, the runner starts FAST-LIO without
-RViz, records the computed outputs, and exits after the bag and processing
-queue finish. It then generates final map and trajectory artifacts. A separate
-command can visualize those frozen artifacts later without rerunning FAST-LIO
-or changing the saved odometry.
+The offline workflow separates FAST-LIO computation from visualization. It
+plays an existing MID-360 bag once, runs FAST-LIO without a GUI, records only
+the registered clouds and odometry needed for final artifacts, and exits after
+the bag and processing queue finish. The saved map and trajectory can be
+visualized later without rerunning FAST-LIO.
 
-All three experiment profiles support this workflow:
+Rebuild the workspace after pulling this feature. Then run the following from
+the repository root in the ROS 2 Humble project container:
 
-| Profile | Processing input |
-|---|---|
-| `baseline` | MID-360 only |
-| `fused-high` | MID-360 + Pandar XT16, higher retained density |
-| `fused-matched` | MID-360 + Pandar XT16, density-matched sampling |
+```bash
+BAG=/mnt/go2w-experiment-recorder/bags/experiment_long3_20260714_014823
+RESULTS_ROOT="${FASTLIO_RESULTS_ROOT:-$PWD/results}"
+OUT="$RESULTS_ROOT/fastlio/long3/baseline"
 
-Run the commands from the repository root in the ROS 2 Humble project
-container. This example creates a `fused-matched` result:
+bash scripts/offline/run_fastlio_offline.sh \
+  "$BAG" --rate 1.0 --output "$OUT"
+```
+
+The runner reads only `/livox/lidar` and `/livox/imu`. It starts playback
+paused, verifies all processing and recording endpoints, validates the live
+FAST-LIO parameters, and then resumes the bag. The headless configuration
+retains the accuracy tuning while disabling cumulative `/Laser_map`, `/path`,
+the unused body-frame cloud, and FAST-LIO's built-in PCD writer.
+It uses the same metadata detector and `--lidar-format` contract as interactive
+replay. PointCloud2 runs additionally record adapter diagnostics and save the
+final counters as `livox_adapter_diagnostics.json`; CustomMsg runs explicitly
+record that the adapter was disabled in `manifest.json`.
+
+A successful analyzed run contains:
+
+- `rosbag/`: frozen `/odom`, `/Odometry`, and `/cloud_registered`
+- `map_voxelized.pcd`: final accumulated registered-scan map
+- `map_preview.pcd`: bounded-size RViz preview
+- `trajectory.csv` and `trajectory_camera_init.csv`: frozen trajectories
+- `summary.json`: map, trajectory, resource, and artifact metadata
+- configuration snapshots, hashes, process metrics, and logs
+- for PointCloud2 input, `livox_adapter_diagnostics.json` and its source/runtime hashes
+
+The devcontainer sets
+`FASTLIO_RESULTS_ROOT=/mnt/fastlio-go2w/results`, backed by the host data
+disk. `docker/run.sh` uses the same external directory when it exists and
+otherwise falls back to the repository's mounted `results/` directory.
+Outside these containers, the default is `<repository>/results`. The output
+directory must be empty.
+
+Display the completed map and trajectory in RViz:
+
+```bash
+bash scripts/offline/visualize_fastlio_run.sh "$OUT"
+```
+
+Static mode publishes the frozen preview map and trajectory. Dynamic mode
+starts with an empty map and path, replays the already-computed
+`/cloud_registered` and `/odom`, and incrementally adds new 0.2 m map
+voxels and trajectory poses:
+
+```bash
+bash scripts/offline/visualize_fastlio_run.sh "$OUT" --dynamic --rate 2.0
+```
+
+The current registered scan remains visible separately while the accumulated
+map and traveled path grow. Dynamic replay does not publish the completed PCD
+or trajectory CSV up front. Both modes reconstruct the saved `odom ->
+camera_init` display transform from the MID-360 calibration, so the RViz Grid
+is parallel to the initial robot `base_link` XY plane. Neither visualization
+mode runs FAST-LIO. See the
+[offline result artifact workflow](docs/offline-result-artifacts.md) for
+artifact definitions, validation, comparison, and troubleshooting.
+
+A completed run with finite clouds and odometry establishes software replay
+operation only. It does not establish ground-truth trajectory accuracy,
+Jetson performance, live-hardware behavior, or physical deployment readiness.
+
+### Experimental MID-360 + XT16 offline comparison
+
+The isolated fusion workflow remains available alongside the generic
+MID-360-only workflow imported from `main`. It records the baseline and fused
+profiles separately so their outputs and resource measurements remain
+attributable:
 
 ```bash
 BAG=/mnt/go2w-experiment-recorder/bags/experiment_long3_20260714_014823
@@ -260,47 +349,14 @@ OUT="$RESULTS_ROOT/multilidar/long3/fused-matched"
 
 bash scripts/offline/run_multilidar_experiment.sh \
   "$BAG" --profile fused-matched --rate 1.0 --output "$OUT"
-```
-
-The runner starts bag playback paused, verifies the ROS endpoints and live
-parameters, and records only the processing outputs needed for artifacts and
-diagnostics: `/odom`, `/Odometry`, `/cloud_registered`, and fusion diagnostics.
-The headless FAST-LIO configurations disable the live cumulative `/Laser_map`,
-`/path`, and unused body-frame cloud publishers. A successful analyzed run
-contains, among other provenance and diagnostic files:
-
-- `rosbag/`: the frozen output topics
-- `map_voxelized.pcd`: the final accumulated registered-scan map
-- `map_preview.pcd`: a bounded-size preview of that map for RViz
-- `trajectory.csv` and `trajectory_camera_init.csv`: frozen trajectories
-- `summary.json`: map, trajectory, resource, and artifact metadata
-
-The devcontainer sets `FASTLIO_RESULTS_ROOT=/mnt/fastlio-go2w/results`, which
-is backed by the host data disk. `docker/run.sh` uses the same external
-directory when it exists and otherwise falls back to the repository's mounted
-`results/` directory. Outside these containers, the runner defaults to
-`<repository>/results`. If `--output` is omitted, it creates a timestamped
-directory below `$FASTLIO_RESULTS_ROOT/multilidar/<bag-name>/`. Use `--no-analyze`
-only when the result bag should be saved without immediately generating the
-PCD maps and trajectory CSVs.
-
-To display the completed map and trajectory in RViz:
-
-```bash
 bash scripts/offline/visualize_multilidar_run.sh "$OUT"
 ```
 
-Static mode publishes the saved preview map and trajectory. Dynamic mode also
-replays the already-computed `/cloud_registered` and `/Odometry` outputs:
-
-```bash
-bash scripts/offline/visualize_multilidar_run.sh "$OUT" --dynamic --rate 2.0
-```
-
-Neither visualization mode runs FAST-LIO or the fusion node. See the
-[offline result artifact workflow](docs/offline-result-artifacts.md) for the
-full profile comparison procedure, artifact definitions, validation, and
-troubleshooting.
+The batch multi-LiDAR runner currently retains its original CustomMsg input
+contract. The interactive replay command above supports both recorded MID-360
+formats through the imported adapter. See
+[the Issue #7 experiment report](docs/experiments/issue-7-mid360-xt16.md) for
+the profile definitions, evidence, and interpretation limits.
 
 ## Attribution
 

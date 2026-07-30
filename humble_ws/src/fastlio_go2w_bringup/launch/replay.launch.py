@@ -1,4 +1,4 @@
-"""Replay a raw bag with legacy or offline multi-LiDAR FAST-LIO profiles."""
+"""Replay a raw bag with single- or experimental multi-LiDAR FAST-LIO."""
 
 import os
 
@@ -13,6 +13,9 @@ from launch.actions import (
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+from fastlio_go2w_bringup.livox_replay import resolve_livox_replay_graph
 
 
 _OFFLINE_PROFILES = {"baseline", "fused-high", "fused-matched"}
@@ -22,8 +25,28 @@ def _processing(context, package_share):
     profile = LaunchConfiguration("profile").perform(context)
     config_override = LaunchConfiguration("config").perform(context)
     rviz = LaunchConfiguration("rviz").perform(context)
+    lidar_format = LaunchConfiguration("lidar_format").perform(context)
+    actions = []
 
     if profile == "legacy":
+        graph = resolve_livox_replay_graph(lidar_format)
+        if graph.adapter_enabled:
+            actions.append(
+                Node(
+                    package="fastlio_go2w_livox",
+                    executable="livox_pointcloud_adapter",
+                    name="livox_pointcloud_adapter",
+                    output="screen",
+                    parameters=[
+                        {
+                            "use_sim_time": True,
+                            "input_topic": graph.input_topic,
+                            "output_topic": graph.fastlio_topic,
+                            "diagnostics_topic": graph.diagnostics_topic,
+                        }
+                    ],
+                )
+            )
         config_path = config_override or os.path.join(
             package_share, "config", "mid360_go2w.yaml"
         )
@@ -33,6 +56,7 @@ def _processing(context, package_share):
             "use_sim_time": "true",
             "use_rviz": rviz,
             "config": config_path,
+            "lid_topic_override": graph.fastlio_topic,
         }
     else:
         if profile not in _OFFLINE_PROFILES:
@@ -47,16 +71,18 @@ def _processing(context, package_share):
             "publish_debug_cloud": LaunchConfiguration("publish_debug_cloud").perform(
                 context
             ),
+            "lidar_format": lidar_format,
         }
         if config_override:
             launch_arguments["config"] = config_override
 
-    return [
+    actions.append(
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(launch_path),
             launch_arguments=launch_arguments.items(),
         )
-    ]
+    )
+    return actions
 
 
 def _play_bag(context):
@@ -122,6 +148,11 @@ def generate_launch_description():
                 "config",
                 default_value="",
                 description="Optional FAST-LIO parameter YAML override.",
+            ),
+            DeclareLaunchArgument(
+                "lidar_format",
+                default_value="custom-msg",
+                description="Resolved MID-360 input format: custom-msg or pointcloud2.",
             ),
             DeclareLaunchArgument(
                 "publish_debug_cloud",

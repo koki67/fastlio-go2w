@@ -2,9 +2,9 @@
 """Sample CPU time and RSS for named processes from Linux /proc.
 
 Targets are rooted at a process started by the experiment runner. A selector
-then identifies the actual worker among that root and its descendants, which
-lets the sampler distinguish FAST-LIO and fusion nodes launched by one
-``ros2 launch`` process.
+then identifies the actual worker among that root and its descendants rather
+than attributing the wrapper ``ros2 launch`` process. This supports both the
+single-LiDAR FAST-LIO workflow and the experimental FAST-LIO/fusion graph.
 """
 
 from __future__ import annotations

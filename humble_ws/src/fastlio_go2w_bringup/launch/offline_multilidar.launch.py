@@ -15,6 +15,8 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
+from fastlio_go2w_bringup.livox_replay import resolve_livox_replay_graph
+
 
 _PROFILES = {
     "baseline": None,
@@ -47,7 +49,27 @@ def _processing_nodes(context, package_share):
             "Rebuild the selected workspace overlay."
         )
 
+    graph = resolve_livox_replay_graph(
+        LaunchConfiguration("lidar_format").perform(context)
+    )
     actions = []
+    if graph.adapter_enabled:
+        actions.append(
+            Node(
+                package="fastlio_go2w_livox",
+                executable="livox_pointcloud_adapter",
+                name="livox_pointcloud_adapter",
+                output="screen",
+                parameters=[
+                    {
+                        "use_sim_time": True,
+                        "input_topic": graph.input_topic,
+                        "output_topic": graph.fastlio_topic,
+                        "diagnostics_topic": graph.diagnostics_topic,
+                    }
+                ],
+            )
+        )
     fusion_parameters = _PROFILES[profile]
     if fusion_parameters is not None:
         actions.append(
@@ -59,7 +81,7 @@ def _processing_nodes(context, package_share):
                 parameters=[
                     {
                         "use_sim_time": True,
-                        "mid_topic": "/livox/lidar",
+                        "mid_topic": graph.fastlio_topic,
                         "hesai_topic": "/points_raw",
                         "output_topic": "/livox/lidar_fused",
                         "diagnostics_topic": "/fastlio_go2w_fusion/diagnostics",
@@ -89,18 +111,22 @@ def _processing_nodes(context, package_share):
             )
         )
 
+    bringup_arguments = {
+        "with_sensors": "false",
+        "use_rviz": LaunchConfiguration("use_rviz"),
+        "use_sim_time": "true",
+        "time_sync_en": "false",
+        "config": config_path,
+    }
+    if fusion_parameters is None:
+        bringup_arguments["lid_topic_override"] = graph.fastlio_topic
+
     actions.append(
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(package_share, "launch", "bringup.launch.py")
             ),
-            launch_arguments={
-                "with_sensors": "false",
-                "use_rviz": LaunchConfiguration("use_rviz"),
-                "use_sim_time": "true",
-                "time_sync_en": "false",
-                "config": config_path,
-            }.items(),
+            launch_arguments=bringup_arguments.items(),
         )
     )
     return actions
@@ -125,6 +151,11 @@ def generate_launch_description():
                 "publish_debug_cloud",
                 default_value="false",
                 description="Publish the source-labelled fusion debug PointCloud2.",
+            ),
+            DeclareLaunchArgument(
+                "lidar_format",
+                default_value="custom-msg",
+                description="Resolved MID-360 input format: custom-msg or pointcloud2.",
             ),
             DeclareLaunchArgument(
                 "use_rviz",

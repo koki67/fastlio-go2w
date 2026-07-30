@@ -1,514 +1,309 @@
 # Offline FAST-LIO result artifacts and visualization
 
-This workflow is for controlled, offline comparison of MID-360-only FAST-LIO
-and MID-360 + Pandar XT16 fusion. It processes an existing raw rosbag once,
-stores the computed odometry and registered clouds in a result bag, and then
-visualizes or analyzes that frozen result. RViz is deliberately not part of the
-measurement run.
+This workflow processes a recorded Livox MID-360 bag once without RViz, saves
+the computed FAST-LIO outputs, generates deterministic map and trajectory
+artifacts, and visualizes those frozen results later. It is independent of the
+interactive replay workflow and does not start the robot sensor stack.
 
-The source bag is not modified, and none of these commands starts a robot
-sensor stack.
+The source bag is read-only. The processing run consumes only /livox/lidar and
+/livox/imu; no secondary LiDAR topic is required.
+
+This document describes the generic MID-360-only workflow imported from
+`main`. The experimental `feat/offline-dual-lidar-fusion` branch keeps its
+MID-360 + XT16 batch comparison alongside it in
+`scripts/offline/run_multilidar_experiment.sh`; see
+[`experiments/issue-7-mid360-xt16.md`](experiments/issue-7-mid360-xt16.md).
 
 ## Data flow
 
-```text
-raw sensor bag
-  /livox/lidar + /livox/imu + /points_raw
+~~~text
+raw MID-360 bag
+  /livox/lidar (CustomMsg or PointCloud2) + /livox/imu
         |
-        | scripts/offline/run_multilidar_experiment.sh
-        | FAST-LIO, optional fusion, result recording, resource sampling
+        | metadata type detection
+        | PointCloud2 only: adapter -> /livox/lidar_fastlio CustomMsg
+        | scripts/offline/run_fastlio_offline.sh
+        | FAST-LIO + odom adapter + result recording + resource sampling
         v
 run directory
-  rosbag/{/odom, /Odometry, /cloud_registered, fusion diagnostics}
+  rosbag/{/odom, /Odometry, /cloud_registered}
         |
         | deterministic post-processing
         v
   summary.json + trajectory CSVs + voxelized/preview PCD maps
         |
-        | scripts/offline/visualize_multilidar_run.sh
+        | scripts/offline/visualize_fastlio_run.sh
         v
-  static final-map view or dynamic replay of already-computed output
-```
+  static final-map view or growing replay of already-computed output
+~~~
 
-The headless runner starts the source bag paused, waits for all processing and
+The runner starts source-bag playback paused, waits for all processing and
 recording endpoints, validates the live FAST-LIO parameters, and only then
-resumes playback. It records output topics rather than asking FAST-LIO to keep
-publishing cumulative visualization messages. After playback and a short drain,
-it stops all measured processes before running the analyzer.
+resumes playback. After the player exits, it waits until the result bag remains
+unchanged for a stable interval, stops the measured processes, validates the
+finalized bag, and runs the analyzer.
 
-## Run the baseline and fused-matched experiments
+## Build and storage setup
 
-Build the ROS 2 Humble workspace first and run these commands from the
-repository root in the project container. For the example dataset, the host
-path is:
+Build the ROS 2 Humble workspace before the first run and after changes to the
+launch file or offline configuration.
 
-```text
-/mnt/data1/experimental_data/go2w-experiment-recorder/bags/experiment_long3_20260714_014823
-```
+The desktop devcontainer maps the host result directory
 
-The devcontainer exposes the same directory as
-`/mnt/go2w-experiment-recorder/bags`. The following commands use that container
-path:
+~~~text
+/mnt/data1/experimental_data/fastlio-go2w/results
+~~~
 
-```bash
-bash scripts/offline/run_multilidar_experiment.sh \
-  /mnt/go2w-experiment-recorder/bags/experiment_long3_20260714_014823 \
-  --profile baseline \
+to /mnt/fastlio-go2w/results and sets:
+
+~~~bash
+FASTLIO_RESULTS_ROOT=/mnt/fastlio-go2w/results
+~~~
+
+docker/run.sh uses the same data-disk directory when it exists. If it does not
+exist, the Docker runner uses /external/results, which is retained through the
+repository bind mount. When the offline script runs outside either container
+and the variable is unset, it uses <repository>/results.
+
+Rebuild and reopen the devcontainer once after the mount configuration changes.
+
+## Run headless FAST-LIO
+
+Run from the repository root inside the project container:
+
+~~~bash
+BAG=/mnt/go2w-experiment-recorder/bags/experiment_long3_20260714_014823
+RESULTS_ROOT="${FASTLIO_RESULTS_ROOT:-$PWD/results}"
+OUT="$RESULTS_ROOT/fastlio/long3/baseline"
+
+bash scripts/offline/run_fastlio_offline.sh \
+  "$BAG" \
   --rate 1.0 \
-  --output results/multilidar/long3/baseline
+  --output "$OUT"
+~~~
 
-bash scripts/offline/run_multilidar_experiment.sh \
-  /mnt/go2w-experiment-recorder/bags/experiment_long3_20260714_014823 \
-  --profile fused-matched \
-  --rate 1.0 \
-  --output results/multilidar/long3/fused-matched
-```
+The output directory must not contain files from an earlier run. If --output
+is omitted, the runner creates a UTC-timestamped directory below:
 
-Run the profiles sequentially. Parallel runs compete for CPU, memory, and disk
-bandwidth and therefore do not provide a fair resource or stability comparison.
-The output directory must be empty. The devcontainer sets
-`FASTLIO_RESULTS_ROOT=/mnt/fastlio-go2w/results`, backed by
-`/mnt/data1/experimental_data/fastlio-go2w/results` on the host.
-`docker/run.sh` uses that host directory when it exists and falls back to
-`/external/results`; outside these containers, the default is
-`<repository>/results`. If `--output` is omitted, the runner creates a
-timestamped directory below
-`$FASTLIO_RESULTS_ROOT/multilidar/<bag-name>/`.
+~~~text
+$FASTLIO_RESULTS_ROOT/fastlio/<bag-name>/
+~~~
 
-`fused-high` remains available for the higher-density experiment:
+Useful options are:
 
-```bash
-bash scripts/offline/run_multilidar_experiment.sh \
-  /mnt/go2w-experiment-recorder/bags/experiment_long3_20260714_014823 \
-  --profile fused-high \
-  --rate 1.0 \
-  --output results/multilidar/long3/fused-high
-```
-
-The profile-specific front-end sampling is:
-
-| Profile | FAST-LIO cloud | MID-360 selection | XT16 selection |
-| --- | --- | ---: | ---: |
-| `baseline` | `/livox/lidar` | no fusion-node selection | none |
-| `fused-matched` | `/livox/lidar_fused` | every 6th valid point | every 22nd firing group |
-| `fused-high` | `/livox/lidar_fused` | every 3rd valid point | every 3rd firing group |
-
-An XT16 firing group retains all 16 rings. The two fused profiles differ only
-in front-end density; they use the same fused FAST-LIO tuning by default.
-
-## Default FAST-LIO configurations
-
-The runner selects these headless defaults:
-
-| Profile | Configuration |
+| Option | Purpose |
 | --- | --- |
-| `baseline` | `mid360_go2w_accuracy_offline.yaml` |
-| `fused-matched`, `fused-high` | `mid360_xt16_fused_accuracy_offline.yaml` |
+| --start-offset SEC | Start within the source bag |
+| --duration SEC | Stop after an approximate bag duration; smoke tests only |
+| --rate RATE | Source playback multiplier; default 1.0 |
+| --domain-id ID | Isolated ROS domain; default 77 |
+| --config YAML | Explicit compatible headless FAST-LIO configuration |
+| --lidar-format auto\|custom-msg\|pointcloud2 | Auto-detect or assert the exact metadata type; default auto |
+| --no-analyze | Keep the result bag without immediately generating PCD/CSV artifacts |
+| --map-voxel-size M | Final map voxel edge; default 0.20 m |
+| --preview-max-points N | RViz preview point cap; default 500000 |
+| --plane-random-seed N | Deterministic local-plane sample seed; default 7 |
 
-The baseline file keeps the tuning from
-`mid360_go2w_accuracy_dense_false.yaml`. The fused file keeps the same tuning,
-apart from the input contract required by the combined cloud:
+A --duration run is useful for endpoint and pipeline smoke testing, but it is
+not a complete map and should not be compared with full-bag results.
 
-- baseline: `common.lid_topic: /livox/lidar` and `preprocess.scan_line: 4`
-- fused: `common.lid_topic: /livox/lidar_fused` and
-  `preprocess.scan_line: 20`
+## Headless FAST-LIO contract
 
-Both offline files use `point_filter_num: 1`, `max_iteration: 3`, 0.20 m surface
-and map filters, and the same IMU noise, range, and extrinsic parameters. They
-also use this output contract:
+The default mid360_go2w_accuracy_offline.yaml keeps the tuning from
+mid360_go2w_accuracy_dense_false.yaml and changes only these publishers:
 
-```yaml
+~~~yaml
 publish:
   map_en: false
   path_en: false
-  effect_map_en: false
-  scan_publish_en: true
-  dense_publish_en: false
   scan_bodyframe_pub_en: false
-pcd_save:
-  pcd_save_en: false
-```
+~~~
 
-Thus FAST-LIO publishes the downsampled, registered scan
-`/cloud_registered`, while cumulative `/Laser_map`, cumulative `/path`, and the
-unused body-frame cloud are disabled. The runner reads the live node parameters
-and fails before playback if the map, path, registered-scan, dense-scan, or
-body-frame flags violate this contract. Keep effect-map and internal PCD saving
-disabled as shown so they do not add unrelated output work.
+It keeps scan_publish_en enabled because /cloud_registered is the source of the
+final map. The built-in PCD writer remains disabled. The runner validates the
+live parameters before playback, including:
 
-### Override `--config`
+- common.lid_topic is `/livox/lidar` for CustomMsg or `/livox/lidar_fastlio` for PointCloud2
+- preprocess.scan_line is 4
+- cumulative map, path, effect-map, and body-frame publishers are disabled
+- registered-cloud output is enabled
+- dense output, runtime position log, and built-in PCD saving are disabled
 
-`--config YAML` is still a complete FAST-LIO parameter override. It accepts an
-existing path from the current directory, a repository-relative path, or a file
-name under `humble_ws/src/fastlio_go2w_bringup/config/`:
+A custom configuration supplied with --config must preserve this input and
+output contract. The selected YAML, live parameter dump, launch source hash,
+runtime executable hashes, source-bag metadata hash, and Git revision are saved
+with each run.
 
-```bash
-bash scripts/offline/run_multilidar_experiment.sh \
-  /mnt/go2w-experiment-recorder/bags/experiment_long3_20260714_014823 \
-  --profile baseline \
-  --config mid360_go2w_accuracy_offline.yaml \
-  --output results/multilidar/long3/baseline-explicit
-```
+The runner accepts exactly `livox_ros_driver2/msg/CustomMsg` and
+`sensor_msgs/msg/PointCloud2` on `/livox/lidar`. It rejects a missing topic,
+zero messages, unsupported or multiple types, malformed metadata, and an
+explicit format that contradicts metadata before creating the output
+directory. Readiness checks verify endpoint types as well as counts.
 
-This example explicitly selects an existing compatible file. For custom tuning,
-copy that offline YAML to a new file first, then pass the new path.
+CustomMsg keeps the legacy processing graph. PointCloud2 starts
+`fastlio_go2w_livox`, keeps the source on `/livox/lidar`, and publishes the
+normalized CustomMsg on `/livox/lidar_fastlio`; the graph never exposes two
+types on one topic. Only `common.lid_topic` is overridden, so all other values
+from `--config` remain authoritative.
 
-A baseline override must retain `/livox/lidar` and four scan lines. A fused
-override must retain `/livox/lidar_fused` and 20 scan lines. Every override must
-retain the headless output flags above. The runner copies the chosen file to
-`fastlio_config.yaml` in the run directory, executes that snapshot, dumps the
-live node parameters to `fastlio_mapping.yaml`, and records their hashes in the
-manifest.
+Direct `lidar_type=4` processing is intentionally not used. The existing
+FAST-LIO PointCloud2 handler does not read this Livox producer's absolute
+`timestamp` field and expects a different reflectivity schema. The boundary
+adapter instead reconstructs the existing Livox CustomMsg time contract.
 
-## Automatic analysis and artifacts
+## Generated artifacts
 
 Analysis is enabled by default. A successful run contains at least:
 
 | Artifact | Purpose |
 | --- | --- |
-| `manifest.json` | source bag, playback settings, profile, hashes, process state, and artifact inventory |
-| `fastlio_config.yaml` | exact FAST-LIO YAML snapshot executed by the run |
-| `fastlio_mapping.yaml` | live FAST-LIO parameter dump |
-| `dual_lidar_fusion.yaml` | live fusion parameter dump for a fused profile |
-| `commands.log` | shell-escaped launch, record, play, and analysis commands |
-| `rosbag/` | frozen `/odom`, `/Odometry`, `/cloud_registered`, and fusion diagnostics |
-| `resource_metrics.csv` | one-second process CPU/RSS samples |
-| `resource_summary.json` | runner resource summary |
-| `trajectory.csv` | primary trajectory; `/odom` is preferred, with `/Odometry` as fallback |
-| `trajectory_camera_init.csv` | raw FAST-LIO `/Odometry` trajectory used by the viewer |
-| `map_voxelized.pcd` | complete voxelized accumulation of all finite `/cloud_registered` points |
-| `map_preview.pcd` | deterministic, bounded-size subset used by RViz |
-| `summary.json` | trajectory, map, diagnostic, resource, provenance, and artifact-hash summary |
-| `analysis.log` | analyzer output or error details |
+| manifest.json | Source bag, playback settings, hashes, process state, and artifact inventory |
+| fastlio_config.yaml | Exact FAST-LIO YAML snapshot executed by the run |
+| fastlio_mapping.yaml | Live FAST-LIO parameter dump |
+| commands.log | Shell-escaped launch, record, play, and analysis commands |
+| rosbag/ | Frozen /odom, /Odometry, and /cloud_registered |
+| resource_metrics.csv | Per-process CPU-time and RSS samples |
+| resource_summary.json | Resource-sampling summary |
+| trajectory.csv | Primary trajectory; /odom is preferred |
+| trajectory_camera_init.csv | Raw FAST-LIO /Odometry trajectory retained for analysis and debugging |
+| map_voxelized.pcd | Voxelized accumulation of all finite registered points |
+| map_preview.pcd | Deterministic bounded-size map used by RViz |
+| summary.json | Trajectory, map, resource, provenance, and artifact hashes |
+| analysis.log | Analyzer output or error details |
+| livox_adapter_diagnostics.json | PointCloud2-only final conversion, drop, reorder, quantization, and scan-width counters |
+| extract_livox_adapter_diagnostics.py | PointCloud2-only frozen diagnostics extractor |
 
-The trajectory CSVs contain message and bag timestamps, elapsed time, position,
-quaternion, `frame_id`, and `child_frame_id`. The analyzer preserves separate
-records for `/odom` and `/Odometry` in `summary.json`.
+The analyzer preserves the frame IDs found in the recorded data. It rejects
+mixed nonempty cloud frames. The viewer uses the `/odom` trajectory for the
+robot path and reconstructs the calibrated `odom -> camera_init` transform for
+the registered clouds. RViz therefore uses `odom` as its fixed frame.
 
-FAST-LIO normally emits `/cloud_registered` and `/Odometry` in `camera_init`.
-The analyzer records the actual cloud and trajectory frame IDs instead of
-silently rewriting them. It rejects mixed nonempty cloud frames. The artifact
-viewer selects the `/Odometry` trajectory, verifies that its single frame
-matches the map frame, and passes that validated frame to RViz as its fixed
-frame. The Orbit camera follows the fixed frame. These runs normally use
-`camera_init`; the RViz file keeps that standalone default, but the wrapper
-overrides it with the validated frame.
+map_voxelized.pcd contains x, y, z, and count; count is the number of registered
+points accumulated into each voxel. Voxel keys are sorted before writing,
+preview points are selected at stable indexes, and local-plane sampling uses
+the configured random seed.
 
-The PCD files contain `x`, `y`, `z`, and `count`, where `count` is the number of
-raw registered points accumulated into that voxel. Binary PCD is the analyzer
-default. Voxel keys are sorted before writing; preview points are selected at
-stable, evenly spaced indexes; local-plane sampling uses a fixed random seed.
-`summary.json` records SHA-256 hashes and sizes for the PCD and trajectory
-artifacts as well as a hash of the analysis parameters.
+`manifest.json` records the detected ROS type, requested and resolved format,
+FAST-LIO input topic, whether the adapter was enabled, adapter configuration,
+source/runtime hashes, and diagnostics artifact/hash. A legacy CustomMsg run
+stores `enabled: false` and null adapter artifacts without changing the
+existing result-bag contract.
 
-The summary reports, among other values:
-
-- odometry rate, gaps, non-finite samples, translation/orientation jumps, path
-  length, and terminal displacement;
-- map coverage, bounds, occupied voxels, local plane thickness, and planarity;
-- per-process average CPU cores and peak RSS;
-- fusion diagnostic level/message counts, numeric distributions, and final
-  counter values.
-
-These are relative stability and consistency diagnostics. The example bag has
-no ground truth, so trajectory difference from the MID-only run is not ATE,
-RPE, or absolute accuracy.
-
-### Map-analysis options
-
-The runner exposes the options most useful for consistent map comparisons:
-
-- `--map-voxel-size M`: final PCD voxel edge, 0.20 m by default;
-- `--preview-max-points N`: RViz preview cap, 500,000 by default;
-- `--plane-random-seed N`: deterministic local-plane sample seed, 7 by
-  default.
-
-These options affect post-processing only; they do not change FAST-LIO
-odometry. Use the same values for every compared profile. A lower preview cap
-reduces RViz memory and graphics load without changing `map_voxelized.pcd` or
-any computed odometry.
-
-### Skip or rerun analysis
-
-`--no-analyze` stops after producing the result bag and runner artifacts. Such
-a directory cannot be opened by the artifact viewer until analysis has created
-`summary.json`, the PCDs, and trajectory CSVs. To analyze it later:
-
-```bash
-python3 scripts/offline/analyze_multilidar_run.py analyze \
-  results/multilidar/long3/baseline/rosbag \
-  --output-dir results/multilidar/long3/baseline \
-  --label baseline \
-  --voxel-size 0.20 \
-  --preview-max-points 500000 \
-  --plane-random-seed 7
-```
-
-The analyzer also exposes lower-level thresholds, plane-neighborhood settings,
-PCD format, and storage plugin through `--help`. Keep them identical across
-runs used in one comparison.
+The current Livox PointCloud2 uses epoch-scale absolute nanoseconds in a
+FLOAT64 field. At that magnitude the ULP is 256 ns. The adapter clamps only a
+negative first-point delta no larger than half the observed ULP to zero and
+counts it as quantization clamping; a larger negative delta remains a critical
+frame drop. All valid frames are stable-sorted by rounded timestamp before
+CustomMsg publication.
 
 ## Visualize a completed result
 
-The viewer validates artifact paths, point counts, hashes, PCD structure, and
-map/trajectory frames before it opens RViz. It starts and cleans up all required
-processes, so each view needs only one terminal. Run the GUI in the graphical
-devcontainer/desktop environment with a built workspace overlay and a valid
-`DISPLAY` or `WAYLAND_DISPLAY`.
+Run the viewer in a graphical ROS 2 Humble environment with the workspace
+built and sourced. Use an unused ROS_DOMAIN_ID if another ROS graph is active.
 
-The viewer inherits `ROS_DOMAIN_ID` and uses absolute ROS topic names. Select an
-unused domain so a live robot or another replay cannot publish into the same
-RViz session. The examples below use domain 78; any unused valid domain is fine.
+### Static final map
 
-### Static final-map view
+~~~bash
+ROS_DOMAIN_ID=78 bash scripts/offline/visualize_fastlio_run.sh "$OUT"
+~~~
 
-Use static mode for the clearest side-by-side evaluation of final map shape and
-trajectory:
+Static mode publishes map_preview.pcd as /offline/map and the saved /odom
+trajectory as /offline/path. The viewer reconstructs the static
+odom -> camera_init transform from the canonical MID-360 calibration and uses
+odom as the RViz fixed frame. The Grid is therefore parallel to the initial
+robot base_link XY plane rather than the pitched sensor frame. It does not play
+a bag or run FAST-LIO. This is the preferred mode for final-map inspection and
+screenshots.
 
-```bash
-ROS_DOMAIN_ID=78 bash scripts/offline/visualize_multilidar_run.sh \
-  results/multilidar/long3/baseline
+### Dynamic saved-result replay
 
-ROS_DOMAIN_ID=78 bash scripts/offline/visualize_multilidar_run.sh \
-  results/multilidar/long3/fused-matched
-```
+~~~bash
+ROS_DOMAIN_ID=78 bash scripts/offline/visualize_fastlio_run.sh \
+  "$OUT" --dynamic --rate 1.0
+~~~
 
-Stop the first RViz window before starting the second command. Static mode
-publishes the frozen preview PCD as `/offline/map` and the frozen
-matching-frame trajectory as `/offline/path`. Both use reliable,
-transient-local QoS, so RViz receives them even if its subscriptions start
-after the one-shot publication. No bag, FAST-LIO node, or fusion node runs in
-this mode.
+Dynamic mode does not publish the completed PCD or trajectory CSV. It begins
+with an empty map and path, replays only /cloud_registered and /odom from the
+result bag, publishes each newly occupied map voxel once, and republishes the
+base-aligned path as saved odometry poses arrive. RViz retains the incremental
+voxel batches, so the registered-scan map and traveled path grow in playback
+time while the current registered scan and robot base pose remain visible
+separately.
 
-This mode is best for final-map screenshots, inspecting double walls or warped
-surfaces, and comparing the completed paths without animation.
+The voxel edge is read from summary.json (0.20 m by default). This prevents
+RViz from retaining every repeated raw point: each voxel is displayed once,
+even though the result bag may contain tens of millions of registered points.
+The rate changes animation speed but cannot change the saved FAST-LIO output.
+No FAST-LIO process is started.
 
-### Dynamic result replay
+Changing this display alignment does not require regenerating result artifacts.
+The result bag already contains /odom; the viewer supplies only the saved
+sensor-to-base static transform needed to display camera_init data in odom.
 
-Use dynamic mode to inspect when the trajectory begins to jump or the
-registered cloud becomes inconsistent:
+To validate artifacts without starting ROS publishers or RViz:
 
-```bash
-ROS_DOMAIN_ID=78 bash scripts/offline/visualize_multilidar_run.sh \
-  results/multilidar/long3/baseline \
-  --dynamic --rate 1.0
+~~~bash
+python3 scripts/offline/publish_fastlio_artifacts.py \
+  "$OUT" --validate-only
+~~~
 
-ROS_DOMAIN_ID=78 bash scripts/offline/visualize_multilidar_run.sh \
-  results/multilidar/long3/fused-matched \
-  --dynamic --rate 1.0
-```
+## Compare repeated runs
 
-Dynamic mode keeps the frozen `/offline/map` and `/offline/path` displays and
-additionally replays only `/cloud_registered` and `/Odometry` from the result
-bag. It never reruns FAST-LIO or fusion. Consequently, changing the viewer's
-`--rate` changes animation speed and GUI load but cannot change the saved
-odometry.
+The analyzer can compare two or more completed runs produced from the same
+source bag and compatible analysis settings:
 
-Use 1.0x when recording a real-time video, or a lower viewer rate when a dense
-cloud overwhelms the display. Use the static view for final-map captures: a
-dynamic video shows temporal failure onset, whereas a static map makes global
-consistency easier to compare.
+~~~bash
+python3 scripts/offline/analyze_fastlio_run.py compare \
+  results/fastlio/run-a \
+  results/fastlio/run-b \
+  --labels run-a run-b \
+  --output results/fastlio/comparison_summary.json
+~~~
 
-`--no-rviz` keeps the ROS publishers running without a GUI. Static mode then
-waits until Ctrl-C, while dynamic mode waits for result playback to finish; it
-is not a terminating artifact check. For a one-shot headless check, use:
+Comparison mode checks source-bag identity, playback settings, trajectory
+thresholds, voxel size, preview cap, PCD format, and deterministic analysis
+parameters before reporting trajectory differences and resource metrics.
+Without ground truth, those differences are consistency diagnostics rather
+than absolute trajectory error.
 
-```bash
-python3 scripts/offline/publish_multilidar_artifacts.py RUN_DIR --validate-only
-```
-
-## Compare runs fairly
-
-Use the same source bag and these same runner settings for all profiles:
-
-- `--start-offset` and `--duration`;
-- `--rate`;
-- map-analysis options and analyzer thresholds;
-- FAST-LIO tuning except for the required fused input topic/scan-line change;
-- built executables, fusion transform, and host load conditions.
-
-Prefer a complete 1.0x playback for the final comparison. `--duration` uses an
-approximate wall timer and is intended for smoke tests. A slower source
-playback can help diagnose compute starvation, but it is a different experiment
-because callback scheduling, queueing, and measured CPU behavior change. Never
-compare one profile at 0.5x with another at 1.0x.
-
-The comparison command requires successful completed manifests and enforces
-the source bag path/hash, selected source topics, offset, duration, rate,
-primary trajectory, jump thresholds, voxel size, PCD format, local-plane
-radius, and local-plane minimum point count as invariants. It does not enforce
-the preview cap, voxel chunk size, plane sample cap, or plane random seed; check
-those analysis parameters yourself before comparing plane metrics:
-
-```bash
-python3 scripts/offline/analyze_multilidar_run.py compare \
-  results/multilidar/long3/baseline \
-  results/multilidar/long3/fused-matched \
-  --labels baseline fused-matched \
-  --output results/multilidar/long3/comparison_summary.json
-```
-
-It writes both `comparison_summary.json` and `comparison_summary.csv`. Put the
-MID-only run first: it is treated as the reference trajectory, but it is not
-treated as truth.
-
-### Repeatability checks
-
-One replay can be affected by thread scheduling or transient host load. Run at
-least two full repetitions per profile, preferably three, with identical
-options and distinct output directories. Do not run repetitions concurrently.
-For example, repeat the two runner commands with outputs such as
-`baseline-r1`, `baseline-r2`, `fused-matched-r1`, and `fused-matched-r2`, then
-compare all four with the first baseline as the common reference:
-
-```bash
-python3 scripts/offline/analyze_multilidar_run.py compare \
-  results/multilidar/long3/baseline-r1 \
-  results/multilidar/long3/baseline-r2 \
-  results/multilidar/long3/fused-matched-r1 \
-  results/multilidar/long3/fused-matched-r2 \
-  --labels baseline-r1 baseline-r2 fused-matched-r1 fused-matched-r2 \
-  --output results/multilidar/long3/repeatability_summary.json
-```
-
-Compare failure time, gap/jump counts, maximum step, path length, map bounds,
-plane metrics, CPU, and RSS across repetitions. The reference-divergence fields
-measure positional disagreement with `baseline-r1`; they remain behavior
-differences, not accuracy errors.
-
-Analyzer determinism is a separate check from runtime repeatability. Reanalyzing
-the same immutable result bag with the same options should reproduce the PCD
-and trajectory hashes. Do not compare the hash of the whole `summary.json`,
-because it contains a generation timestamp. Compare its `artifact_hashes` and
-`analysis_parameters_sha256`, or run `sha256sum` on the PCD/CSV artifacts.
-
-## Read fusion diagnostics
-
-Fused result bags include `/fastlio_go2w_fusion/diagnostics`. The analyzer
-aggregates numeric samples into count, mean, median, p95, maximum, and final
-value under `summary.json`'s `diagnostics.numeric_values`; it does not retain
-the raw sample series. Final string values are also available under
-`diagnostics.last_values`. Keys have the form `TOPIC/STATUS/COUNTER`, so the
-counter names below appear as key suffixes rather than direct fields:
-
-- throughput: `mid_messages_received`, `hesai_messages_received`,
-  `hesai_messages_accepted`, and `fused_messages_published`;
-- source integrity: `mid_nonmonotonic_drops`, `mid_point_count_mismatches`,
-  `hesai_nonmonotonic_drops`, `hesai_parser_errors`, `hesai_partial_clouds`, and
-  `hesai_invalid_points`;
-- fusion coverage: `mid_points_output`, `hesai_points_output`,
-  `hesai_points_stale`, and `hesai_points_filtered`;
-- buffering/fallback: `mid_only_fallbacks`, `pending_queue_overflows`,
-  `idle_flush_frames`, `pending_mid_frames`, and `buffered_hesai_points`.
-
-`last_processing_time_ms` records the most recent fusion callback duration.
-Most named totals are cumulative counters; `pending_mid_frames` and
-`buffered_hesai_points` are instantaneous gauges. Check both the final value and
-the distribution captured by the analyzer.
-
-For a healthy fused run, published-frame count should track accepted MID
-windows, both source point-output totals should be nonzero, and parser errors,
-unexpected non-monotonic drops, queue overflows, and MID-only fallbacks should
-normally remain zero. Partial input clouds, stale/filtered points, or points
-remaining buffered at the final boundary can be legitimate; interpret them
-against timestamps and message counts rather than assuming every nonzero value
-is a failure.
-
-Use `--debug-cloud` only for a focused fusion/extrinsic investigation. It adds
-the source-labelled `/livox/lidar_fused_debug` topic to publication and result
-recording, which changes processing and I/O load. Therefore, do not compare a
-debug-enabled fused run's CPU numbers with a baseline run that did not record
-the extra cloud.
-
-The standard offline result viewer deliberately does not replay or render the
-debug topic; dynamic mode remains limited to `/cloud_registered` and
-`/Odometry`. Debug-cloud inspection is a separate custom RViz task: replay
-`/livox/lidar_fused_debug` from the result bag, add a PointCloud2 display for
-that topic, and use the cloud header frame as RViz's fixed frame.
-Alternatively, run interactive fused replay with `--debug-cloud` and add that
-display manually.
-Neither method is part of the one-terminal result viewer.
-
-## What the offline map represents
-
-`map_voxelized.pcd` is the complete voxelized accumulation of every finite
-point recorded on `/cloud_registered`. `map_preview.pcd` is a deterministic,
-bounded subset of those sorted voxel centroids. The artifact publisher prefers
-the preview for `/offline/map` and falls back to the complete PCD only when the
-summary has no preview path. Use the full PCD for complete offline analysis and
-the preview topic for responsive RViz inspection.
-
-It is **not** FAST-LIO's `/Laser_map`, and it is not a serialization of the
-internal incremental k-d tree (iKD-Tree). `/Laser_map` is a cumulative
-visualization topic whose repeated publication is deliberately disabled in
-headless measurement.
-The internal map also has update/deletion state that cannot be reconstructed
-exactly from registered output scans. Accordingly, do not expect point-for-point
-identity with an interactive main-branch `/Laser_map` display. The accumulated
-registered-cloud map is the comparable artifact used by this workflow.
+Likewise, nonzero finite `/cloud_registered`, `/Odometry`, and `/odom` output
+proves that the software path ran, not that trajectory quality, Jetson
+performance, live hardware, or physical operation is qualified. XT16 remains
+outside this MID-360 dual-format workflow.
 
 ## Troubleshooting
 
-### RViz opens but the fused map is blank
+### The runner reports a stale workspace
 
-Validate the analyzed artifacts directly:
+Rebuild the Humble workspace. The runner requires the installed launch and
+shared Livox graph files to match their sources byte-for-byte. PointCloud2 runs
+also require the Livox adapter executable in that same overlay; all runs check
+the FAST-LIO and odom adapter executables.
 
-```bash
-python3 scripts/offline/publish_multilidar_artifacts.py \
-  results/multilidar/long3/fused-matched --validate-only
-```
+### The output directory is not empty
 
-The command reports the selected preview PCD, point count, trajectory, pose
-count, and frame. The visualizer runs the same validation automatically. A
-missing `summary.json` usually means the run used `--no-analyze`; run the
-analyzer before opening it. A hash, count, PCD, or frame mismatch means the run
-directory is incomplete or an artifact was modified and should not be silently
-ignored.
+Choose a new directory. The runner will not overwrite a partial or completed
+run because mixing artifacts would invalidate provenance and hashes.
 
-In RViz, inspect `/offline/map` and `/offline/path`, not `/Laser_map`. The
-wrapper prints the validated artifact frame and sets it as RViz's fixed frame;
-choose **Reset View** if the geometry is far outside the current camera. Dynamic
-registered scans appear on `/cloud_registered` only after `--dynamic` starts
-result playback.
+### RViz opens but the map is blank
+
+Validate the run first:
+
+~~~bash
+python3 scripts/offline/publish_fastlio_artifacts.py RUN_DIR --validate-only
+~~~
+
+The command checks PCD structure, hashes, point counts, trajectory data, and
+map/trajectory frame compatibility.
 
 ### Dynamic mode has no animation
 
-Confirm that `RUN_DIR/rosbag/metadata.yaml` exists and that the bag contains
-`/cloud_registered` and `/Odometry`:
+Confirm that RUN_DIR/rosbag exists and contains /cloud_registered and /odom:
 
-```bash
-ros2 bag info results/multilidar/long3/fused-matched/rosbag
-```
+~~~bash
+ros2 bag info RUN_DIR/rosbag
+~~~
 
-Dynamic mode does not read the original sensor bag and does not recreate
-missing output. Re-run the headless experiment if the result bag lacks those
-topics.
-
-### The runner rejects a custom config
-
-Check the profile's input topic and scan-line count, then ensure `map_en`,
-`path_en`, and `scan_bodyframe_pub_en` are false, `scan_publish_en` is true, and
-`dense_publish_en` is false. The rejection is intentional: changing those
-outputs changes load and breaks the result-artifact contract.
-
-### Comparison reports an invariant mismatch
-
-Read the named field in the error. It usually indicates a different source
-bag, playback rate/interval, map voxel size, PCD format, or analysis threshold.
-Re-run or re-analyze with identical values instead of overriding the check.
-
-### A fused map shows double walls or separated ground surfaces
-
-Treat this as a possible extrinsic or timing problem, not an odometry
-improvement. Make a focused fused run with `--debug-cloud`, inspect the
-source-labelled points using the separate custom RViz procedure above, and
-check the fusion counters for stale, filtered, partial, or dropped XT16 data.
-Keep any revised transform and time offset fixed across every profile being
-compared.
-
-### The workspace is reported as stale or missing
-
-Rebuild the Humble workspace in the project container. The runner intentionally
-checks that the installed launch file matches the source and that the required
-FAST-LIO, odometry-adapter, and fusion executables exist before starting a long
-experiment.
+Static visualization only requires the analyzed PCD and trajectory artifacts.
+Dynamic visualization requires summary.json plus the saved result bag. It does
+not use the completed PCD or trajectory CSV as its initial display.
