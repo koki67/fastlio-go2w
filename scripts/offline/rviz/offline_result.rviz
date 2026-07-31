@@ -20,7 +20,7 @@ Visualization Manager:
       Channel Name: count
       Class: rviz_default_plugins/PointCloud2
       Color: 235; 235; 235
-      Color Transformer: FlatColor
+      Color Transformer: AxisColor
       Decay Time: 1000000
       Enabled: true
       Invert Rainbow: false
@@ -40,7 +40,7 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /offline/map
       Use Fixed Frame: true
-      Use rainbow: false
+      Use rainbow: true
       Value: true
     - Alpha: 1
       Buffer Length: 1
