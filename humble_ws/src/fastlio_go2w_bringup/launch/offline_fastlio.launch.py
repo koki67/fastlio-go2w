@@ -14,6 +14,8 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+from fastlio_go2w_bringup.livox_replay import resolve_livox_replay_graph
+
 
 def _processing_nodes(context, package_share):
     sensor = LaunchConfiguration("sensor").perform(context)
@@ -36,9 +38,10 @@ def _processing_nodes(context, package_share):
             "Rebuild the selected workspace overlay."
         )
 
-    nodes = []
+    actions = []
     if sensor == "xt16":
-        nodes.append(
+        lid_topic_override = "/points_raw_fastlio"
+        actions.append(
             Node(
                 package="fastlio_go2w_hesai",
                 executable="hesai_pointcloud_adapter",
@@ -57,8 +60,30 @@ def _processing_nodes(context, package_share):
                 ],
             )
         )
+    else:
+        graph = resolve_livox_replay_graph(
+            LaunchConfiguration("lidar_format").perform(context)
+        )
+        lid_topic_override = graph.fastlio_topic
+        if graph.adapter_enabled:
+            actions.append(
+                Node(
+                    package="fastlio_go2w_livox",
+                    executable="livox_pointcloud_adapter",
+                    name="livox_pointcloud_adapter",
+                    output="screen",
+                    parameters=[
+                        {
+                            "use_sim_time": True,
+                            "input_topic": graph.input_topic,
+                            "output_topic": graph.fastlio_topic,
+                            "diagnostics_topic": graph.diagnostics_topic,
+                        }
+                    ],
+                )
+            )
 
-    nodes.append(
+    actions.append(
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(package_share, "launch", "bringup.launch.py")
@@ -70,10 +95,11 @@ def _processing_nodes(context, package_share):
                 "time_sync_en": "false",
                 "config": config_path,
                 "imu_frame": "imu" if sensor == "xt16" else "livox_imu_frame",
+                "lid_topic_override": lid_topic_override,
             }.items(),
         )
     )
-    return nodes
+    return actions
 
 
 def generate_launch_description():
@@ -96,6 +122,14 @@ def generate_launch_description():
                 default_value="0.0",
                 description=(
                     "Signed XT16 LiDAR header offset in seconds; ignored for mid360."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "lidar_format",
+                default_value="custom-msg",
+                description=(
+                    "Resolved MID-360 Livox input format: custom-msg or pointcloud2; "
+                    "ignored for xt16."
                 ),
             ),
             OpaqueFunction(

@@ -22,6 +22,8 @@ Options:
   --output DIR        Result directory (default: ${FASTLIO_RESULTS_ROOT}/fastlio/<bag>/...)
   --config YAML       Override tuning while preserving the selected sensor's
                       input and headless publisher contract
+  --lidar-format NAME Livox input format: auto, custom-msg, or pointcloud2
+                      (default: auto; explicit values must match metadata)
   --no-analyze        Keep the result bag but skip automatic artifact generation
   --map-voxel-size M  Final map voxel edge length (default: 0.20)
   --preview-max-points N
@@ -50,6 +52,7 @@ RATE="1.0"
 DOMAIN_ID="77"
 OUTPUT_DIR=""
 CONFIG_OVERRIDE=""
+LIDAR_FORMAT_OVERRIDE="auto"
 ANALYZE="true"
 MAP_VOXEL_SIZE="0.20"
 PREVIEW_MAX_POINTS="500000"
@@ -90,6 +93,10 @@ while [ "$#" -gt 0 ]; do
             CONFIG_OVERRIDE="${2:?Error: --config requires a value}"
             shift 2
             ;;
+        --lidar-format)
+            LIDAR_FORMAT_OVERRIDE="${2:?Error: --lidar-format requires a value}"
+            shift 2
+            ;;
         --no-analyze)
             ANALYZE="false"
             shift
@@ -127,13 +134,11 @@ case "$SENSOR" in
     mid360)
         SOURCE_TOPICS=(/livox/lidar /livox/imu)
         DEFAULT_CONFIG_NAME="mid360_go2w_accuracy_offline.yaml"
-        EXPECTED_LID_TOPIC="/livox/lidar"
         EXPECTED_SCAN_LINES="4"
         ;;
     xt16)
         SOURCE_TOPICS=(/points_raw /go2w/imu)
         DEFAULT_CONFIG_NAME="xt16_go2w_accuracy_offline.yaml"
-        EXPECTED_LID_TOPIC="/points_raw_fastlio"
         EXPECTED_SCAN_LINES="16"
         ;;
     *)
@@ -160,6 +165,13 @@ if [ -n "$DURATION" ]; then
         || die "--duration must be greater than zero"
 fi
 [[ "$DOMAIN_ID" =~ ^[0-9]+$ ]] || die "--domain-id must be a non-negative integer"
+case "$LIDAR_FORMAT_OVERRIDE" in
+    auto|custom-msg|pointcloud2) ;;
+    *) die "--lidar-format must be auto, custom-msg, or pointcloud2" ;;
+esac
+if [ "$SENSOR" = "xt16" ] && [ "$LIDAR_FORMAT_OVERRIDE" != "auto" ]; then
+    die "--lidar-format applies only to --sensor mid360"
+fi
 
 BAG="$(realpath "$BAG")"
 [ -d "$BAG" ] || die "bag directory not found: $BAG"
@@ -168,6 +180,40 @@ for topic in "${SOURCE_TOPICS[@]}"; do
     grep -Eq "name: ${topic}$" "$BAG/metadata.yaml" \
         || die "required topic $topic is absent from the bag"
 done
+
+FORMAT_DETECTOR="$REPO_ROOT/scripts/fastlio/detect_livox_bag_format.py"
+DETECTED_LIDAR_FORMAT="not-applicable"
+RESOLVED_LIDAR_FORMAT="custom-msg"
+DETECTED_LIDAR_ROS_TYPE="sensor_msgs/msg/PointCloud2"
+FASTLIO_LID_TOPIC="/points_raw_fastlio"
+LIVOX_ADAPTER_ENABLED="false"
+if [ "$SENSOR" = "mid360" ]; then
+    [ -f "$FORMAT_DETECTOR" ] || die "Livox bag format detector not found: $FORMAT_DETECTOR"
+    if ! DETECTED_LIDAR_FORMAT="$(python3 "$FORMAT_DETECTOR" "$BAG/metadata.yaml")"; then
+        die "could not establish a supported Livox input format"
+    fi
+    if [ "$LIDAR_FORMAT_OVERRIDE" != "auto" ] && \
+       [ "$LIDAR_FORMAT_OVERRIDE" != "$DETECTED_LIDAR_FORMAT" ]; then
+        die "--lidar-format $LIDAR_FORMAT_OVERRIDE conflicts with metadata format $DETECTED_LIDAR_FORMAT"
+    fi
+    RESOLVED_LIDAR_FORMAT="$DETECTED_LIDAR_FORMAT"
+    case "$RESOLVED_LIDAR_FORMAT" in
+        custom-msg)
+            DETECTED_LIDAR_ROS_TYPE="livox_ros_driver2/msg/CustomMsg"
+            FASTLIO_LID_TOPIC="/livox/lidar"
+            ;;
+        pointcloud2)
+            DETECTED_LIDAR_ROS_TYPE="sensor_msgs/msg/PointCloud2"
+            FASTLIO_LID_TOPIC="/livox/lidar_fastlio"
+            LIVOX_ADAPTER_ENABLED="true"
+            ;;
+    esac
+fi
+LIVOX_ADAPTER_INPUT_TOPIC="/livox/lidar"
+LIVOX_ADAPTER_OUTPUT_TOPIC="/livox/lidar_fastlio"
+LIVOX_ADAPTER_DIAGNOSTICS_TOPIC="/fastlio_go2w_livox/diagnostics"
+LIVOX_ADAPTER_MAX_DELTA_SEC="0.2"
+LIVOX_ADAPTER_MINIMUM_POINTS="10"
 
 CONFIG_DIR="$REPO_ROOT/humble_ws/src/fastlio_go2w_bringup/config"
 if [ -n "$CONFIG_OVERRIDE" ]; then
@@ -198,15 +244,13 @@ fi
 
 if [ -f /opt/ros/humble/setup.bash ]; then
     set +u
-    # This fixed ROS path exists only in the Humble image.
-    # shellcheck disable=SC1091
     source /opt/ros/humble/setup.bash
     set -u
 elif [ "${ROS_DISTRO:-}" != "humble" ]; then
     die "ROS 2 Humble is required (run this inside the project container)"
 fi
 
-for command in ros2 setsid python3 sha256sum cp git realpath; do
+for command in ros2 setsid pgrep python3 sha256sum cp git realpath; do
     command -v "$command" >/dev/null || die "required command not found: $command"
 done
 python3 -c 'import yaml' >/dev/null 2>&1 \
@@ -215,53 +259,89 @@ python3 -c 'import yaml' >/dev/null 2>&1 \
 LAUNCH_SOURCE="$REPO_ROOT/humble_ws/src/fastlio_go2w_bringup/launch/offline_fastlio.launch.py"
 [ -f "$LAUNCH_SOURCE" ] || die "experiment launch source not found: $LAUNCH_SOURCE"
 LAUNCH_SHA256="$(sha256sum "$LAUNCH_SOURCE" | awk '{print $1}')"
+GRAPH_SOURCE="$REPO_ROOT/humble_ws/src/fastlio_go2w_bringup/src/fastlio_go2w_bringup/livox_replay.py"
+[ -f "$GRAPH_SOURCE" ] || die "Livox replay graph source not found: $GRAPH_SOURCE"
+GRAPH_SHA256="$(sha256sum "$GRAPH_SOURCE" | awk '{print $1}')"
+
+LIVOX_ADAPTER_SOURCE=""
+LIVOX_ADAPTER_SOURCE_SHA256=""
+LIVOX_DIAGNOSTICS_EXTRACTOR_SOURCE=""
+if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+    LIVOX_ADAPTER_SOURCE="$REPO_ROOT/humble_ws/src/fastlio_go2w_livox"
+    [ -d "$LIVOX_ADAPTER_SOURCE" ] || die "Livox adapter source package not found"
+    LIVOX_ADAPTER_SOURCE_SHA256="$(
+        sha256sum \
+            "$LIVOX_ADAPTER_SOURCE/include/fastlio_go2w_livox/pointcloud_adapter.hpp" \
+            "$LIVOX_ADAPTER_SOURCE/src/pointcloud_adapter.cpp" \
+            "$LIVOX_ADAPTER_SOURCE/src/livox_pointcloud_adapter_node.cpp" | sha256sum | awk '{print $1}'
+    )"
+    LIVOX_DIAGNOSTICS_EXTRACTOR_SOURCE="$SCRIPT_DIR/extract_livox_adapter_diagnostics.py"
+    [ -f "$LIVOX_DIAGNOSTICS_EXTRACTOR_SOURCE" ] \
+        || die "Livox diagnostics extractor not found: $LIVOX_DIAGNOSTICS_EXTRACTOR_SOURCE"
+fi
+HESAI_DIAGNOSTICS_EXTRACTOR_SOURCE=""
+if [ "$SENSOR" = "xt16" ]; then
+    HESAI_DIAGNOSTICS_EXTRACTOR_SOURCE="$SCRIPT_DIR/extract_hesai_diagnostics.py"
+    [ -f "$HESAI_DIAGNOSTICS_EXTRACTOR_SOURCE" ] \
+        || die "Hesai diagnostics extractor not found: $HESAI_DIAGNOSTICS_EXTRACTOR_SOURCE"
+fi
 
 ANALYZER_SOURCE=""
 if [ "$ANALYZE" = "true" ]; then
     ANALYZER_SOURCE="$SCRIPT_DIR/analyze_fastlio_run.py"
     [ -f "$ANALYZER_SOURCE" ] || die "analyzer not found: $ANALYZER_SOURCE"
 fi
-DIAGNOSTICS_EXTRACTOR_SOURCE=""
-if [ "$SENSOR" = "xt16" ]; then
-    DIAGNOSTICS_EXTRACTOR_SOURCE="$SCRIPT_DIR/extract_hesai_diagnostics.py"
-    [ -f "$DIAGNOSTICS_EXTRACTOR_SOURCE" ] \
-        || die "Hesai diagnostics extractor not found: $DIAGNOSTICS_EXTRACTOR_SOURCE"
-fi
 
 candidate_is_usable() {
     local candidate="$1"
-    local install_root bringup_prefix launch_runtime fastlio_runtime
-    local odom_runtime hesai_runtime
+    local install_root bringup_prefix launch_runtime graph_runtime fastlio_runtime
+    local odom_runtime livox_runtime hesai_runtime graph_egg_link graph_python_root
     install_root="$(dirname "$candidate")"
     bringup_prefix="$install_root/fastlio_go2w_bringup"
     launch_runtime="$bringup_prefix/share/fastlio_go2w_bringup/launch/offline_fastlio.launch.py"
+    graph_runtime="$bringup_prefix/lib/python3.10/site-packages/fastlio_go2w_bringup/livox_replay.py"
+    if [ ! -f "$graph_runtime" ]; then
+        graph_egg_link="$bringup_prefix/lib/python3.10/site-packages/fastlio-go2w-bringup.egg-link"
+        [ -f "$graph_egg_link" ] || return 1
+        IFS= read -r graph_python_root < "$graph_egg_link" || return 1
+        graph_runtime="$graph_python_root/fastlio_go2w_bringup/livox_replay.py"
+    fi
     fastlio_runtime="$install_root/fast_lio/lib/fast_lio/fastlio_mapping"
     odom_runtime="$bringup_prefix/lib/fastlio_go2w_bringup/fastlio_odom_adapter"
+    livox_runtime="$install_root/fastlio_go2w_livox/lib/fastlio_go2w_livox/livox_pointcloud_adapter"
     hesai_runtime="$install_root/fastlio_go2w_hesai/lib/fastlio_go2w_hesai/hesai_pointcloud_adapter"
 
     [ -f "$candidate" ] || return 1
     [ -f "$launch_runtime" ] || return 1
+    [ -f "$graph_runtime" ] || return 1
     [ -x "$fastlio_runtime" ] || return 1
     [ -x "$odom_runtime" ] || return 1
+    [ "$(sha256sum "$launch_runtime" | awk '{print $1}')" = "$LAUNCH_SHA256" ] \
+        || return 1
+    [ "$(sha256sum "$graph_runtime" | awk '{print $1}')" = "$GRAPH_SHA256" ] \
+        || return 1
+    if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+        [ -x "$livox_runtime" ] || return 1
+    fi
     if [ "$SENSOR" = "xt16" ]; then
         [ -x "$hesai_runtime" ] || return 1
     fi
-    [ "$(sha256sum "$launch_runtime" | awk '{print $1}')" = "$LAUNCH_SHA256" ] \
-        || return 1
 
     (
         set +u
-        # Candidate is an intentionally discovered overlay.
-        # shellcheck disable=SC1090
         source "$candidate"
         set -u
         [ "$(ros2 pkg prefix fastlio_go2w_bringup 2>/dev/null)" = "$bringup_prefix" ] \
             || exit 1
         [ "$(ros2 pkg prefix fast_lio 2>/dev/null)" = "$install_root/fast_lio" ] \
             || exit 1
+        if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+            [ "$(ros2 pkg prefix fastlio_go2w_livox 2>/dev/null)" = \
+              "$install_root/fastlio_go2w_livox" ] || exit 1
+        fi
         if [ "$SENSOR" = "xt16" ]; then
             [ "$(ros2 pkg prefix fastlio_go2w_hesai 2>/dev/null)" = \
-                "$install_root/fastlio_go2w_hesai" ] || exit 1
+              "$install_root/fastlio_go2w_hesai" ] || exit 1
         fi
     )
 }
@@ -278,8 +358,6 @@ done
 [ -n "$WORKSPACE_SETUP" ] \
     || die "no usable current Humble workspace overlay was found; rebuild the workspace"
 set +u
-# The selected overlay was validated above.
-# shellcheck disable=SC1090
 source "$WORKSPACE_SETUP"
 set -u
 
@@ -287,12 +365,25 @@ INSTALL_ROOT="$(dirname "$WORKSPACE_SETUP")"
 BRINGUP_PREFIX="$INSTALL_ROOT/fastlio_go2w_bringup"
 LAUNCH_RUNTIME="$BRINGUP_PREFIX/share/fastlio_go2w_bringup/launch/offline_fastlio.launch.py"
 LAUNCH_RUNTIME_SHA256="$(sha256sum "$LAUNCH_RUNTIME" | awk '{print $1}')"
+GRAPH_RUNTIME="$BRINGUP_PREFIX/lib/python3.10/site-packages/fastlio_go2w_bringup/livox_replay.py"
+if [ ! -f "$GRAPH_RUNTIME" ]; then
+    GRAPH_EGG_LINK="$BRINGUP_PREFIX/lib/python3.10/site-packages/fastlio-go2w-bringup.egg-link"
+    IFS= read -r GRAPH_PYTHON_ROOT < "$GRAPH_EGG_LINK"
+    GRAPH_RUNTIME="$GRAPH_PYTHON_ROOT/fastlio_go2w_bringup/livox_replay.py"
+fi
+GRAPH_RUNTIME_SHA256="$(sha256sum "$GRAPH_RUNTIME" | awk '{print $1}')"
 FASTLIO_RUNTIME="$INSTALL_ROOT/fast_lio/lib/fast_lio/fastlio_mapping"
 ODOM_ADAPTER_RUNTIME="$BRINGUP_PREFIX/lib/fastlio_go2w_bringup/fastlio_odom_adapter"
-HESAI_ADAPTER_RUNTIME=""
-HESAI_ADAPTER_RUNTIME_SHA256=""
 FASTLIO_RUNTIME_SHA256="$(sha256sum "$FASTLIO_RUNTIME" | awk '{print $1}')"
 ODOM_ADAPTER_RUNTIME_SHA256="$(sha256sum "$ODOM_ADAPTER_RUNTIME" | awk '{print $1}')"
+LIVOX_ADAPTER_RUNTIME=""
+LIVOX_ADAPTER_RUNTIME_SHA256=""
+if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+    LIVOX_ADAPTER_RUNTIME="$INSTALL_ROOT/fastlio_go2w_livox/lib/fastlio_go2w_livox/livox_pointcloud_adapter"
+    LIVOX_ADAPTER_RUNTIME_SHA256="$(sha256sum "$LIVOX_ADAPTER_RUNTIME" | awk '{print $1}')"
+fi
+HESAI_ADAPTER_RUNTIME=""
+HESAI_ADAPTER_RUNTIME_SHA256=""
 if [ "$SENSOR" = "xt16" ]; then
     HESAI_ADAPTER_RUNTIME="$INSTALL_ROOT/fastlio_go2w_hesai/lib/fastlio_go2w_hesai/hesai_pointcloud_adapter"
     HESAI_ADAPTER_RUNTIME_SHA256="$(sha256sum "$HESAI_ADAPTER_RUNTIME" | awk '{print $1}')"
@@ -326,16 +417,6 @@ CALIBRATION_SOURCE="$REPO_ROOT/config/sensor/go2w_${SENSOR}_calibration.yaml"
 CALIBRATION_SNAPSHOT="$OUTPUT_DIR/sensor_calibration.yaml"
 [ -f "$CALIBRATION_SOURCE" ] || die "sensor calibration not found: $CALIBRATION_SOURCE"
 CALIBRATION_SHA256=""
-ADAPTER_DIAGNOSTICS=""
-ADAPTER_DIAGNOSTICS_SHA256=""
-DIAGNOSTICS_EXTRACTOR_SNAPSHOT=""
-DIAGNOSTICS_EXTRACTOR_SHA256=""
-if [ "$SENSOR" = "xt16" ]; then
-    ADAPTER_DIAGNOSTICS="$OUTPUT_DIR/adapter_diagnostics.json"
-    DIAGNOSTICS_EXTRACTOR_SNAPSHOT="$OUTPUT_DIR/extract_hesai_diagnostics.py"
-    cp "$DIAGNOSTICS_EXTRACTOR_SOURCE" "$DIAGNOSTICS_EXTRACTOR_SNAPSHOT"
-    DIAGNOSTICS_EXTRACTOR_SHA256="$(sha256sum "$DIAGNOSTICS_EXTRACTOR_SNAPSHOT" | awk '{print $1}')"
-fi
 ANALYZER_SNAPSHOT=""
 ANALYZER_SHA256=""
 ANALYSIS_LOG=""
@@ -344,6 +425,30 @@ if [ "$ANALYZE" = "true" ]; then
     ANALYSIS_LOG="$OUTPUT_DIR/analysis.log"
     cp "$ANALYZER_SOURCE" "$ANALYZER_SNAPSHOT"
     ANALYZER_SHA256="$(sha256sum "$ANALYZER_SNAPSHOT" | awk '{print $1}')"
+fi
+LIVOX_ADAPTER_DIAGNOSTICS=""
+LIVOX_ADAPTER_DIAGNOSTICS_SHA256=""
+LIVOX_DIAGNOSTICS_EXTRACTOR_SNAPSHOT=""
+LIVOX_DIAGNOSTICS_EXTRACTOR_SHA256=""
+LIVOX_DIAGNOSTICS_LOG=""
+if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+    LIVOX_ADAPTER_DIAGNOSTICS="$OUTPUT_DIR/livox_adapter_diagnostics.json"
+    LIVOX_DIAGNOSTICS_EXTRACTOR_SNAPSHOT="$OUTPUT_DIR/extract_livox_adapter_diagnostics.py"
+    LIVOX_DIAGNOSTICS_LOG="$OUTPUT_DIR/livox-adapter-diagnostics.log"
+    cp "$LIVOX_DIAGNOSTICS_EXTRACTOR_SOURCE" "$LIVOX_DIAGNOSTICS_EXTRACTOR_SNAPSHOT"
+    LIVOX_DIAGNOSTICS_EXTRACTOR_SHA256="$(sha256sum "$LIVOX_DIAGNOSTICS_EXTRACTOR_SNAPSHOT" | awk '{print $1}')"
+fi
+HESAI_ADAPTER_DIAGNOSTICS=""
+HESAI_ADAPTER_DIAGNOSTICS_SHA256=""
+HESAI_DIAGNOSTICS_EXTRACTOR_SNAPSHOT=""
+HESAI_DIAGNOSTICS_EXTRACTOR_SHA256=""
+HESAI_DIAGNOSTICS_LOG=""
+if [ "$SENSOR" = "xt16" ]; then
+    HESAI_ADAPTER_DIAGNOSTICS="$OUTPUT_DIR/adapter_diagnostics.json"
+    HESAI_DIAGNOSTICS_EXTRACTOR_SNAPSHOT="$OUTPUT_DIR/extract_hesai_diagnostics.py"
+    HESAI_DIAGNOSTICS_LOG="$OUTPUT_DIR/adapter-diagnostics.log"
+    cp "$HESAI_DIAGNOSTICS_EXTRACTOR_SOURCE" "$HESAI_DIAGNOSTICS_EXTRACTOR_SNAPSHOT"
+    HESAI_DIAGNOSTICS_EXTRACTOR_SHA256="$(sha256sum "$HESAI_DIAGNOSTICS_EXTRACTOR_SNAPSHOT" | awk '{print $1}')"
 fi
 PARAMETER_DUMP_LOG="$OUTPUT_DIR/parameter-dump.log"
 PARAMETER_VALIDATION_LOG="$OUTPUT_DIR/fastlio-parameter-validation.log"
@@ -398,7 +503,29 @@ write_manifest() {
     EXP_FASTLIO_PARAMETERS="$FASTLIO_PARAMETERS_SNAPSHOT" \
     EXP_FASTLIO_PARAMETERS_SHA="$FASTLIO_PARAMETERS_SHA256" \
     EXP_METADATA_SHA="$METADATA_SHA256" EXP_LAUNCH_SHA="$LAUNCH_SHA256" \
-    EXP_LAUNCH_RUNTIME_SHA="$LAUNCH_RUNTIME_SHA256" \
+    EXP_GRAPH_SOURCE="$GRAPH_SOURCE" EXP_GRAPH_SHA="$GRAPH_SHA256" \
+    EXP_GRAPH_RUNTIME="$GRAPH_RUNTIME" EXP_GRAPH_RUNTIME_SHA="$GRAPH_RUNTIME_SHA256" \
+    EXP_LIDAR_ROS_TYPE="$DETECTED_LIDAR_ROS_TYPE" \
+    EXP_DETECTED_LIDAR_FORMAT="$DETECTED_LIDAR_FORMAT" \
+    EXP_RESOLVED_LIDAR_FORMAT="$RESOLVED_LIDAR_FORMAT" \
+    EXP_LIDAR_FORMAT_OVERRIDE="$LIDAR_FORMAT_OVERRIDE" \
+    EXP_FASTLIO_LID_TOPIC="$FASTLIO_LID_TOPIC" \
+    EXP_LIVOX_ADAPTER_ENABLED="$LIVOX_ADAPTER_ENABLED" \
+    EXP_LIVOX_ADAPTER_INPUT_TOPIC="$LIVOX_ADAPTER_INPUT_TOPIC" \
+    EXP_LIVOX_ADAPTER_OUTPUT_TOPIC="$LIVOX_ADAPTER_OUTPUT_TOPIC" \
+    EXP_LIVOX_ADAPTER_DIAGNOSTICS_TOPIC="$LIVOX_ADAPTER_DIAGNOSTICS_TOPIC" \
+    EXP_LIVOX_ADAPTER_MAX_DELTA="$LIVOX_ADAPTER_MAX_DELTA_SEC" \
+    EXP_LIVOX_ADAPTER_MINIMUM_POINTS="$LIVOX_ADAPTER_MINIMUM_POINTS" \
+    EXP_LIVOX_ADAPTER_SOURCE="$LIVOX_ADAPTER_SOURCE" \
+    EXP_LIVOX_ADAPTER_SOURCE_SHA="$LIVOX_ADAPTER_SOURCE_SHA256" \
+    EXP_LIVOX_ADAPTER_RUNTIME="$LIVOX_ADAPTER_RUNTIME" \
+    EXP_LIVOX_ADAPTER_RUNTIME_SHA="$LIVOX_ADAPTER_RUNTIME_SHA256" \
+    EXP_LIVOX_ADAPTER_DIAGNOSTICS="$LIVOX_ADAPTER_DIAGNOSTICS" \
+    EXP_LIVOX_ADAPTER_DIAGNOSTICS_SHA="$LIVOX_ADAPTER_DIAGNOSTICS_SHA256" \
+    EXP_LIVOX_DIAGNOSTICS_EXTRACTOR_SOURCE="$LIVOX_DIAGNOSTICS_EXTRACTOR_SOURCE" \
+    EXP_LIVOX_DIAGNOSTICS_EXTRACTOR_SNAPSHOT="$LIVOX_DIAGNOSTICS_EXTRACTOR_SNAPSHOT" \
+    EXP_LIVOX_DIAGNOSTICS_EXTRACTOR_SHA="$LIVOX_DIAGNOSTICS_EXTRACTOR_SHA256" \
+    EXP_LIVOX_DIAGNOSTICS_LOG="$LIVOX_DIAGNOSTICS_LOG" \
     EXP_GIT_COMMIT="$GIT_COMMIT" EXP_OUTPUT="$OUTPUT_DIR" \
     EXP_WORKSPACE_SETUP="$WORKSPACE_SETUP" \
     EXP_LAUNCH_SOURCE="$LAUNCH_SOURCE" EXP_LAUNCH_RUNTIME="$LAUNCH_RUNTIME" \
@@ -411,10 +538,11 @@ write_manifest() {
     EXP_CALIBRATION_SOURCE="$CALIBRATION_SOURCE" \
     EXP_CALIBRATION_SNAPSHOT="$CALIBRATION_SNAPSHOT" \
     EXP_CALIBRATION_SHA="$CALIBRATION_SHA256" \
-    EXP_ADAPTER_DIAGNOSTICS="$ADAPTER_DIAGNOSTICS" \
-    EXP_ADAPTER_DIAGNOSTICS_SHA="$ADAPTER_DIAGNOSTICS_SHA256" \
-    EXP_DIAGNOSTICS_EXTRACTOR="$DIAGNOSTICS_EXTRACTOR_SNAPSHOT" \
-    EXP_DIAGNOSTICS_EXTRACTOR_SHA="$DIAGNOSTICS_EXTRACTOR_SHA256" \
+    EXP_HESAI_ADAPTER_DIAGNOSTICS="$HESAI_ADAPTER_DIAGNOSTICS" \
+    EXP_HESAI_ADAPTER_DIAGNOSTICS_SHA="$HESAI_ADAPTER_DIAGNOSTICS_SHA256" \
+    EXP_HESAI_DIAGNOSTICS_EXTRACTOR_SNAPSHOT="$HESAI_DIAGNOSTICS_EXTRACTOR_SNAPSHOT" \
+    EXP_HESAI_DIAGNOSTICS_EXTRACTOR_SHA="$HESAI_DIAGNOSTICS_EXTRACTOR_SHA256" \
+    EXP_HESAI_DIAGNOSTICS_LOG="$HESAI_DIAGNOSTICS_LOG" \
     EXP_LAUNCH_PID="$LAUNCH_PID" EXP_RECORDER_PID="$RECORDER_PID" \
     EXP_PLAYER_PID="$PLAYER_PID" EXP_SAMPLER_PID="$SAMPLER_PID" \
     EXP_ANALYZE="$ANALYZE" EXP_MAP_VOXEL_SIZE="$MAP_VOXEL_SIZE" \
@@ -457,15 +585,6 @@ def optional_name(value):
     return pathlib.Path(value).name if value else None
 
 analysis_enabled = env["EXP_ANALYZE"] == "true"
-adapter_diagnostics = None
-adapter_diagnostics_path = env.get("EXP_ADAPTER_DIAGNOSTICS", "")
-if adapter_diagnostics_path and pathlib.Path(adapter_diagnostics_path).is_file():
-    try:
-        adapter_diagnostics = json.loads(
-            pathlib.Path(adapter_diagnostics_path).read_text(encoding="utf-8")
-        )
-    except (OSError, json.JSONDecodeError) as error:
-        adapter_diagnostics = {"read_error": str(error)}
 analysis_details = {
     "enabled": analysis_enabled,
     "voxel_size_m": None,
@@ -497,6 +616,48 @@ if analysis_enabled:
         }
     )
 
+adapter_enabled = env["EXP_LIVOX_ADAPTER_ENABLED"] == "true"
+hesai_adapter_enabled = env["EXP_SENSOR"] == "xt16"
+adapter_diagnostics = None
+adapter_diagnostics_path = env.get("EXP_LIVOX_ADAPTER_DIAGNOSTICS", "")
+if adapter_diagnostics_path and pathlib.Path(adapter_diagnostics_path).is_file():
+    try:
+        adapter_diagnostics = json.loads(
+            pathlib.Path(adapter_diagnostics_path).read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as error:
+        adapter_diagnostics = {"read_error": str(error)}
+hesai_diagnostics = None
+hesai_diagnostics_path = env.get("EXP_HESAI_ADAPTER_DIAGNOSTICS", "")
+if hesai_diagnostics_path and pathlib.Path(hesai_diagnostics_path).is_file():
+    try:
+        hesai_diagnostics = json.loads(
+            pathlib.Path(hesai_diagnostics_path).read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as error:
+        hesai_diagnostics = {"read_error": str(error)}
+
+runtime_executables = {
+    "fastlio": {
+        "path": env["EXP_FASTLIO_RUNTIME"],
+        "sha256": env["EXP_FASTLIO_RUNTIME_SHA"],
+    },
+    "odom_adapter": {
+        "path": env["EXP_ODOM_RUNTIME"],
+        "sha256": env["EXP_ODOM_RUNTIME_SHA"],
+    },
+}
+if adapter_enabled:
+    runtime_executables["livox_adapter"] = {
+        "path": env["EXP_LIVOX_ADAPTER_RUNTIME"],
+        "sha256": env["EXP_LIVOX_ADAPTER_RUNTIME_SHA"],
+    }
+if hesai_adapter_enabled:
+    runtime_executables["hesai_pointcloud_adapter"] = {
+        "path": env["EXP_HESAI_RUNTIME"],
+        "sha256": env["EXP_HESAI_RUNTIME_SHA"],
+    }
+
 run_logs = [
     "launch.log",
     "recorder.log",
@@ -508,10 +669,12 @@ run_logs = [
     optional_name(env["EXP_RESULT_VALIDATION_LOG"]),
     optional_name(env["EXP_RESOURCE_VALIDATION_LOG"]),
 ]
-if env["EXP_SENSOR"] == "xt16":
-    run_logs.append("adapter-diagnostics.log")
 if analysis_enabled:
     run_logs.append(optional_name(env["EXP_ANALYSIS_LOG"]))
+if adapter_enabled:
+    run_logs.append(optional_name(env["EXP_LIVOX_DIAGNOSTICS_LOG"]))
+if hesai_adapter_enabled:
+    run_logs.append(optional_name(env["EXP_HESAI_DIAGNOSTICS_LOG"]))
 
 
 document = {
@@ -522,6 +685,9 @@ document = {
     "bag": {
         "path": env["EXP_BAG"],
         "metadata_sha256": env["EXP_METADATA_SHA"],
+        "lidar_topic": env["EXP_SOURCE_TOPICS"].split()[0],
+        "lidar_ros_type": env["EXP_LIDAR_ROS_TYPE"],
+        "detected_lidar_format": env["EXP_DETECTED_LIDAR_FORMAT"],
     },
     "profile": "baseline",
     "sensor": env["EXP_SENSOR"],
@@ -549,6 +715,7 @@ document = {
         "config_sha256": env["EXP_CONFIG_SHA"],
         "parameters_snapshot": pathlib.Path(env["EXP_FASTLIO_PARAMETERS"]).name,
         "parameters_sha256": env.get("EXP_FASTLIO_PARAMETERS_SHA") or None,
+        "lid_topic": env["EXP_FASTLIO_LID_TOPIC"],
         "map_en": False,
         "path_en": False,
         "effect_map_en": False,
@@ -558,19 +725,55 @@ document = {
         "pcd_save_en": False,
         "runtime_pos_log_enable": False,
     },
+    "livox_input": {
+        "format_override": env["EXP_LIDAR_FORMAT_OVERRIDE"],
+        "detected_format": env["EXP_DETECTED_LIDAR_FORMAT"],
+        "resolved_format": env["EXP_RESOLVED_LIDAR_FORMAT"],
+        "ros_type": env["EXP_LIDAR_ROS_TYPE"],
+    },
+    "livox_adapter": {
+        "enabled": adapter_enabled,
+        "input_topic": env["EXP_LIVOX_ADAPTER_INPUT_TOPIC"] if adapter_enabled else None,
+        "output_topic": env["EXP_LIVOX_ADAPTER_OUTPUT_TOPIC"] if adapter_enabled else None,
+        "diagnostics_topic": (
+            env["EXP_LIVOX_ADAPTER_DIAGNOSTICS_TOPIC"] if adapter_enabled else None
+        ),
+        "config": (
+            {
+                "max_point_header_delta_sec": float(env["EXP_LIVOX_ADAPTER_MAX_DELTA"]),
+                "minimum_points": int(env["EXP_LIVOX_ADAPTER_MINIMUM_POINTS"]),
+            }
+            if adapter_enabled
+            else None
+        ),
+        "source": env.get("EXP_LIVOX_ADAPTER_SOURCE") or None,
+        "source_sha256": env.get("EXP_LIVOX_ADAPTER_SOURCE_SHA") or None,
+        "runtime": env.get("EXP_LIVOX_ADAPTER_RUNTIME") or None,
+        "runtime_sha256": env.get("EXP_LIVOX_ADAPTER_RUNTIME_SHA") or None,
+        "diagnostics_path": optional_name(adapter_diagnostics_path),
+        "diagnostics_sha256": env.get("EXP_LIVOX_ADAPTER_DIAGNOSTICS_SHA") or None,
+        "diagnostics": adapter_diagnostics,
+        "extractor_source": env.get("EXP_LIVOX_DIAGNOSTICS_EXTRACTOR_SOURCE") or None,
+        "extractor_snapshot": optional_name(
+            env.get("EXP_LIVOX_DIAGNOSTICS_EXTRACTOR_SNAPSHOT", "")
+        ),
+        "extractor_sha256": env.get("EXP_LIVOX_DIAGNOSTICS_EXTRACTOR_SHA") or None,
+    },
     "calibration": {
         "source": env["EXP_CALIBRATION_SOURCE"],
         "snapshot": pathlib.Path(env["EXP_CALIBRATION_SNAPSHOT"]).name,
         "sha256": env["EXP_CALIBRATION_SHA"],
     },
     "hesai_adapter": {
-        "enabled": env["EXP_SENSOR"] == "xt16",
+        "enabled": hesai_adapter_enabled,
         "lidar_time_offset_sec": float(env["EXP_LIDAR_TIME_OFFSET_SEC"]),
-        "diagnostics_path": optional_name(adapter_diagnostics_path),
-        "diagnostics_sha256": env.get("EXP_ADAPTER_DIAGNOSTICS_SHA") or None,
-        "diagnostics": adapter_diagnostics,
-        "extractor_snapshot": optional_name(env.get("EXP_DIAGNOSTICS_EXTRACTOR", "")),
-        "extractor_sha256": env.get("EXP_DIAGNOSTICS_EXTRACTOR_SHA") or None,
+        "diagnostics_path": optional_name(hesai_diagnostics_path),
+        "diagnostics_sha256": env.get("EXP_HESAI_ADAPTER_DIAGNOSTICS_SHA") or None,
+        "diagnostics": hesai_diagnostics,
+        "extractor_snapshot": optional_name(
+            env.get("EXP_HESAI_DIAGNOSTICS_EXTRACTOR_SNAPSHOT", "")
+        ),
+        "extractor_sha256": env.get("EXP_HESAI_DIAGNOSTICS_EXTRACTOR_SHA") or None,
     },
     "analysis": analysis_details,
     "git": {
@@ -581,25 +784,13 @@ document = {
     "launch_sha256": env["EXP_LAUNCH_SHA"],
     "launch_source": env["EXP_LAUNCH_SOURCE"],
     "launch_runtime": env["EXP_LAUNCH_RUNTIME"],
-    "launch_runtime_sha256": env["EXP_LAUNCH_RUNTIME_SHA"],
-    "runtime_executables": {
-        "fastlio": {
-            "path": env["EXP_FASTLIO_RUNTIME"],
-            "sha256": env["EXP_FASTLIO_RUNTIME_SHA"],
-        },
-        "odom_adapter": {
-            "path": env["EXP_ODOM_RUNTIME"],
-            "sha256": env["EXP_ODOM_RUNTIME_SHA"],
-        },
-        "hesai_pointcloud_adapter": (
-            {
-                "path": env["EXP_HESAI_RUNTIME"],
-                "sha256": env["EXP_HESAI_RUNTIME_SHA"],
-            }
-            if env["EXP_SENSOR"] == "xt16"
-            else None
-        ),
+    "livox_graph": {
+        "source": env["EXP_GRAPH_SOURCE"],
+        "source_sha256": env["EXP_GRAPH_SHA"],
+        "runtime": env["EXP_GRAPH_RUNTIME"],
+        "runtime_sha256": env["EXP_GRAPH_RUNTIME_SHA"],
     },
+    "runtime_executables": runtime_executables,
     "process_ids": {
         "launch": optional_int(env["EXP_LAUNCH_PID"]),
         "recorder": optional_int(env["EXP_RECORDER_PID"]),
@@ -613,10 +804,16 @@ document = {
         "resource_metrics_sha256": env.get("EXP_RESOURCE_METRICS_SHA") or None,
         "resource_summary": "resource_summary.json",
         "resource_summary_sha256": env.get("EXP_RESOURCE_SUMMARY_SHA") or None,
-        "adapter_diagnostics": optional_name(adapter_diagnostics_path),
-        "adapter_diagnostics_sha256": env.get("EXP_ADAPTER_DIAGNOSTICS_SHA") or None,
         "commands": "commands.log",
         "logs": run_logs,
+        "livox_adapter_diagnostics": optional_name(adapter_diagnostics_path),
+        "livox_adapter_diagnostics_sha256": (
+            env.get("EXP_LIVOX_ADAPTER_DIAGNOSTICS_SHA") or None
+        ),
+        "adapter_diagnostics": optional_name(hesai_diagnostics_path),
+        "adapter_diagnostics_sha256": (
+            env.get("EXP_HESAI_ADAPTER_DIAGNOSTICS_SHA") or None
+        ),
     },
 }
 path = pathlib.Path(sys.argv[1])
@@ -628,12 +825,12 @@ PY
 
 process_group_alive() {
     local pgid="${1:-}"
-    local stat_file record state process_group
+    local stat_file record state ppid process_group
     [ -n "$pgid" ] || return 1
     for stat_file in /proc/[0-9]*/stat; do
         IFS= read -r record 2>/dev/null < "$stat_file" || continue
         record="${record##*) }"
-        read -r state _ process_group _ <<<"$record"
+        read -r state ppid process_group _ <<<"$record"
         [ "$process_group" = "$pgid" ] || continue
         case "$state" in
             Z|X) ;;
@@ -741,89 +938,102 @@ wait_for_topic() {
     return 1
 }
 
-validate_fastlio_parameters() {
-    VALIDATE_SENSOR="$SENSOR" \
-    VALIDATE_LID_TOPIC="$EXPECTED_LID_TOPIC" \
-    VALIDATE_SCAN_LINES="$EXPECTED_SCAN_LINES" \
-    python3 - "$FASTLIO_PARAMETERS_SNAPSHOT" <<'PY'
-from pathlib import Path
-import os
-import sys
-
-import yaml
-
-path = Path(sys.argv[1])
-document = yaml.safe_load(path.read_text(encoding="utf-8"))
-try:
-    parameters = document["/fastlio_mapping"]["ros__parameters"]
-except (KeyError, TypeError) as error:
-    raise SystemExit("live parameter dump has no /fastlio_mapping.ros__parameters") from error
-
-def nested(name):
-    value = parameters
-    for part in name.split("."):
-        if not isinstance(value, dict) or part not in value:
-            raise SystemExit(f"live parameter dump is missing {name}")
-        value = value[part]
-    return value
-
-expected = {
-    "common.lid_topic": os.environ["VALIDATE_LID_TOPIC"],
-    "common.time_sync_en": False,
-    "common.time_offset_lidar_to_imu": 0.0,
-    "preprocess.scan_line": int(os.environ["VALIDATE_SCAN_LINES"]),
-    "publish.map_en": False,
-    "publish.path_en": False,
-    "publish.effect_map_en": False,
-    "publish.scan_bodyframe_pub_en": False,
-    "publish.scan_publish_en": True,
-    "publish.dense_publish_en": False,
-    "pcd_save.pcd_save_en": False,
-    "runtime_pos_log_enable": False,
-}
-if os.environ["VALIDATE_SENSOR"] == "xt16":
-    expected.update(
-        {
-            "common.imu_topic": "/go2w/imu",
-            "preprocess.lidar_type": 2,
-            "preprocess.timestamp_unit": 0,
-        }
-    )
-errors = []
-for name, wanted in expected.items():
-    actual = nested(name)
-    if actual != wanted:
-        errors.append(f"{name}={actual!r}, expected {wanted!r}")
-if errors:
-    raise SystemExit("live FAST-LIO contract violation:\n" + "\n".join(errors))
-print(f"validated {len(expected)} live FAST-LIO parameters from {path}")
-PY
+wait_for_topic_type() {
+    local topic="$1"
+    local expected_type="$2"
+    local minimum_publishers="$3"
+    local minimum_subscribers="$4"
+    local deadline=$((SECONDS + 90))
+    local info actual_type publishers subscribers
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        kill -0 "$LAUNCH_PID" 2>/dev/null || return 1
+        kill -0 "$RECORDER_PID" 2>/dev/null || return 1
+        kill -0 "$PLAYER_PID" 2>/dev/null || return 1
+        info="$(ros2 topic info --no-daemon -v "$topic" 2>/dev/null || true)"
+        actual_type="$(awk '/^Type:/{print $2; exit}' <<<"$info")"
+        publishers="$(awk '/^Publisher count:/{print $3; exit}' <<<"$info")"
+        subscribers="$(awk '/^Subscription count:/{print $3; exit}' <<<"$info")"
+        if [ "$actual_type" = "$expected_type" ] \
+            && [ "${publishers:-0}" -ge "$minimum_publishers" ] \
+            && [ "${subscribers:-0}" -ge "$minimum_subscribers" ]; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    return 1
 }
 
-required_processing_nodes_alive() {
-    local required_commands=(fastlio_mapping fastlio_odom_adapter)
-    if [ "$SENSOR" = "xt16" ]; then
-        required_commands+=(hesai_pointcloud_adapter)
+dump_node_parameters() {
+    local node="$1"
+    local expected_file="$2"
+    local deadline=$((SECONDS + 30))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        kill -0 "$LAUNCH_PID" 2>/dev/null || return 1
+        if ros2 param dump --no-daemon --output-dir "$OUTPUT_DIR" "$node" \
+            >> "$PARAMETER_DUMP_LOG" 2>&1 \
+            && [ -s "$expected_file" ]; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    return 1
+}
+
+assert_fastlio_parameter() {
+    local name="$1"
+    local expected="$2"
+    local actual=""
+    local deadline=$((SECONDS + 10))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        kill -0 "$LAUNCH_PID" 2>/dev/null || break
+        if actual="$(ros2 param get --no-daemon --hide-type /fastlio_mapping "$name" 2>/dev/null)"; then
+            break
+        fi
+        actual=""
+        sleep 0.2
+    done
+    if [ -z "$actual" ]; then
+        echo "Could not read FAST-LIO parameter $name." >&2
+        return 1
     fi
-    local command stat_file record state process_group pid
-    for command in "${required_commands[@]}"; do
-        local found="false"
-        for stat_file in /proc/[0-9]*/stat; do
-            pid="${stat_file#/proc/}"
-            pid="${pid%/stat}"
-            IFS= read -r record 2>/dev/null < "$stat_file" || continue
-            record="${record##*) }"
-            read -r state _ process_group _ <<<"$record"
-            [ "$process_group" = "$LAUNCH_PID" ] || continue
-            case "$state" in
-                Z|X) continue ;;
-            esac
-            if grep -aFq -- "$command" "/proc/$pid/cmdline" 2>/dev/null; then
-                found="true"
-                break
-            fi
-        done
-        [ "$found" = "true" ] || return 1
+    if [ "$actual" != "$expected" ]; then
+        echo "FAST-LIO parameter $name is '$actual', expected '$expected'." >&2
+        return 1
+    fi
+}
+
+validate_fastlio_parameters() {
+    assert_fastlio_parameter common.lid_topic "$FASTLIO_LID_TOPIC" || return 1
+    assert_fastlio_parameter common.time_sync_en False || return 1
+    assert_fastlio_parameter common.time_offset_lidar_to_imu 0.0 || return 1
+    assert_fastlio_parameter preprocess.scan_line "$EXPECTED_SCAN_LINES" || return 1
+    if [ "$SENSOR" = "xt16" ]; then
+        assert_fastlio_parameter common.imu_topic /go2w/imu || return 1
+        assert_fastlio_parameter preprocess.lidar_type 2 || return 1
+        assert_fastlio_parameter preprocess.timestamp_unit 0 || return 1
+    fi
+    assert_fastlio_parameter publish.map_en False || return 1
+    assert_fastlio_parameter publish.path_en False || return 1
+    assert_fastlio_parameter publish.effect_map_en False || return 1
+    assert_fastlio_parameter publish.scan_bodyframe_pub_en False || return 1
+    assert_fastlio_parameter publish.scan_publish_en True || return 1
+    assert_fastlio_parameter publish.dense_publish_en False || return 1
+    assert_fastlio_parameter pcd_save.pcd_save_en False || return 1
+    assert_fastlio_parameter runtime_pos_log_enable False || return 1
+}
+
+required_processing_processes_alive() {
+    local required=(fastlio_mapping fastlio_odom_adapter)
+    local process_name
+    if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+        required+=(livox_pointcloud_adapter)
+    fi
+    if [ "$SENSOR" = "xt16" ]; then
+        required+=(hesai_pointcloud_adapter)
+    fi
+
+    for process_name in "${required[@]}"; do
+        pgrep -g "$LAUNCH_PID" -f -- "$process_name" >/dev/null || return 1
     done
     return 0
 }
@@ -854,7 +1064,7 @@ wait_for_processing_quiescence() {
     local stable_since="$SECONDS"
     local previous_signature=""
     local signature current_size current_mtime elapsed stable_elapsed
-    local node_misses=0
+    local process_misses=0
 
     DRAIN_OUTCOME="waiting"
     DRAIN_ELAPSED_SECONDS="0"
@@ -880,14 +1090,14 @@ wait_for_processing_quiescence() {
             return 1
         fi
 
-        if required_processing_nodes_alive; then
-            node_misses=0
+        if required_processing_processes_alive; then
+            process_misses=0
         else
-            node_misses=$((node_misses + 1))
-            if [ "$node_misses" -ge 3 ]; then
-                DRAIN_OUTCOME="processing_node_missing"
+            process_misses=$((process_misses + 1))
+            if [ "$process_misses" -ge 3 ]; then
+                DRAIN_OUTCOME="processing_process_missing"
                 DRAIN_ELAPSED_SECONDS="$((SECONDS - started_at))"
-                echo "Required processing node disappeared while waiting for quiescence." >&2
+                echo "Required processing process disappeared while waiting for quiescence." >&2
                 return 1
             fi
         fi
@@ -944,16 +1154,17 @@ validate_result_bag() {
     ros2 bag info "$RESULT_BAG"
     echo
     echo "metadata and reader validation:"
-    VALIDATE_SENSOR="$SENSOR" python3 - "$RESULT_BAG" <<'PY'
+    python3 - "$RESULT_BAG" "$LIVOX_ADAPTER_ENABLED" "$SENSOR" <<'PY'
 from pathlib import Path
 import json
-import os
 import sys
 
 import rosbag2_py
 import yaml
 
 root = Path(sys.argv[1]).resolve()
+adapter_enabled = sys.argv[2] == "true"
+sensor = sys.argv[3]
 metadata_path = root / "metadata.yaml"
 
 try:
@@ -1026,7 +1237,9 @@ if total_count != sum(counts.values()):
     )
 
 required = ["/odom", "/Odometry", "/cloud_registered"]
-if os.environ.get("VALIDATE_SENSOR") == "xt16":
+if adapter_enabled:
+    required.append("/fastlio_go2w_livox/diagnostics")
+if sensor == "xt16":
     required.append("/fastlio_go2w_hesai/diagnostics")
 missing = [name for name in required if counts.get(name, 0) <= 0]
 if missing:
@@ -1074,19 +1287,19 @@ PY
 }
 
 validate_resource_artifacts() {
-    VALIDATE_RESOURCE_SENSOR="$SENSOR" \
-    python3 - "$METRICS_CSV" "$METRICS_SUMMARY" <<'PY'
+    python3 - "$METRICS_CSV" "$METRICS_SUMMARY" "$LIVOX_ADAPTER_ENABLED" "$SENSOR" <<'PY'
 from collections import Counter
 from pathlib import Path
 import csv
 import json
-import os
 import sys
 
 csv_path = Path(sys.argv[1])
 summary_path = Path(sys.argv[2])
 required = {"fastlio", "player", "recorder"}
-if os.environ.get("VALIDATE_RESOURCE_SENSOR") == "xt16":
+if sys.argv[3] == "true":
+    required.add("livox_adapter")
+if sys.argv[4] == "xt16":
     required.add("hesai_adapter")
 
 if not csv_path.is_file() or csv_path.stat().st_size <= 0:
@@ -1183,8 +1396,12 @@ LAUNCH_CMD=(
     "config:=$FASTLIO_CONFIG_SNAPSHOT"
     "sensor:=$SENSOR"
     "lidar_time_offset_sec:=$LIDAR_TIME_OFFSET_SEC"
+    "lidar_format:=$RESOLVED_LIDAR_FORMAT"
 )
 RECORD_TOPICS=(/odom /Odometry /cloud_registered)
+if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+    RECORD_TOPICS+=("$LIVOX_ADAPTER_DIAGNOSTICS_TOPIC")
+fi
 if [ "$SENSOR" = "xt16" ]; then
     RECORD_TOPICS+=(/fastlio_go2w_hesai/diagnostics)
 fi
@@ -1205,22 +1422,33 @@ if [ "$ANALYZE" = "true" ]; then
         --plane-random-seed "$PLANE_RANDOM_SEED"
     )
 fi
-DIAGNOSTICS_CMD=()
+LIVOX_DIAGNOSTICS_CMD=()
+if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+    LIVOX_DIAGNOSTICS_CMD=(
+        python3 "$LIVOX_DIAGNOSTICS_EXTRACTOR_SNAPSHOT" "$RESULT_BAG"
+        --output "$LIVOX_ADAPTER_DIAGNOSTICS"
+        --topic "$LIVOX_ADAPTER_DIAGNOSTICS_TOPIC"
+    )
+fi
+HESAI_DIAGNOSTICS_CMD=()
 if [ "$SENSOR" = "xt16" ]; then
-    DIAGNOSTICS_CMD=(
-        python3 "$DIAGNOSTICS_EXTRACTOR_SNAPSHOT" "$RESULT_BAG"
-        --output "$ADAPTER_DIAGNOSTICS"
+    HESAI_DIAGNOSTICS_CMD=(
+        python3 "$HESAI_DIAGNOSTICS_EXTRACTOR_SNAPSHOT" "$RESULT_BAG"
+        --output "$HESAI_ADAPTER_DIAGNOSTICS"
     )
 fi
 {
     printf 'launch:'; printf ' %q' "${LAUNCH_CMD[@]}"; printf '\n'
     printf 'record:'; printf ' %q' "${RECORDER_CMD[@]}"; printf '\n'
     printf 'play:'; printf ' %q' "${PLAYER_CMD[@]}"; printf '\n'
-    if [ "$SENSOR" = "xt16" ]; then
-        printf 'diagnostics:'; printf ' %q' "${DIAGNOSTICS_CMD[@]}"; printf '\n'
-    fi
     if [ "$ANALYZE" = "true" ]; then
         printf 'analyze:'; printf ' %q' "${ANALYZE_CMD[@]}"; printf '\n'
+    fi
+    if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+        printf 'livox-diagnostics:'; printf ' %q' "${LIVOX_DIAGNOSTICS_CMD[@]}"; printf '\n'
+    fi
+    if [ "$SENSOR" = "xt16" ]; then
+        printf 'hesai-diagnostics:'; printf ' %q' "${HESAI_DIAGNOSTICS_CMD[@]}"; printf '\n'
     fi
 } > "$OUTPUT_DIR/commands.log"
 
@@ -1229,6 +1457,12 @@ write_manifest "starting"
 echo "Starting headless FAST-LIO in ROS domain $ROS_DOMAIN_ID"
 echo "Bag: $BAG"
 echo "Output: $OUTPUT_DIR"
+echo "Sensor: $SENSOR"
+if [ "$SENSOR" = "mid360" ]; then
+    echo "Livox metadata type: $DETECTED_LIDAR_ROS_TYPE"
+    echo "Resolved Livox format: $RESOLVED_LIDAR_FORMAT"
+    echo "Livox adapter enabled: $LIVOX_ADAPTER_ENABLED"
+fi
 
 setsid "${LAUNCH_CMD[@]}" > "$OUTPUT_DIR/launch.log" 2>&1 &
 LAUNCH_PID=$!
@@ -1239,13 +1473,16 @@ PLAYER_PID=$!
 
 wait_for_node /fastlio_mapping || die "FAST-LIO did not become ready; see launch.log"
 wait_for_node /fastlio_odom_adapter || die "odom adapter did not become ready; see launch.log"
+if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+    wait_for_node /livox_pointcloud_adapter \
+        || die "Livox adapter did not become ready; see launch.log"
+fi
 if [ "$SENSOR" = "xt16" ]; then
     wait_for_node /hesai_pointcloud_adapter \
         || die "Hesai adapter did not become ready; see launch.log"
 fi
-ros2 param dump --no-daemon --output-dir "$OUTPUT_DIR" /fastlio_mapping \
-    > "$PARAMETER_DUMP_LOG" 2>&1
-[ -s "$FASTLIO_PARAMETERS_SNAPSHOT" ] \
+: > "$PARAMETER_DUMP_LOG"
+dump_node_parameters /fastlio_mapping "$FASTLIO_PARAMETERS_SNAPSHOT" \
     || die "FAST-LIO parameter snapshot was not created"
 validate_fastlio_parameters \
     > "$PARAMETER_VALIDATION_LOG" 2>&1 \
@@ -1256,10 +1493,20 @@ validate_fastlio_parameters \
 FASTLIO_PARAMETERS_SHA256="$(sha256sum "$FASTLIO_PARAMETERS_SNAPSHOT" | awk '{print $1}')"
 wait_for_service /rosbag2_player/resume || die "rosbag player resume service did not appear"
 
-for topic in "${SOURCE_TOPICS[@]}"; do
-    wait_for_topic "$topic" 1 1 || die "$topic endpoints did not become ready"
-done
-if [ "$SENSOR" = "xt16" ]; then
+if [ "$SENSOR" = "mid360" ]; then
+    wait_for_topic_type /livox/lidar "$DETECTED_LIDAR_ROS_TYPE" 1 1 \
+        || die "/livox/lidar endpoints did not become ready with type $DETECTED_LIDAR_ROS_TYPE"
+    if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+        wait_for_topic_type /livox/lidar_fastlio livox_ros_driver2/msg/CustomMsg 1 1 \
+            || die "/livox/lidar_fastlio CustomMsg endpoints did not become ready"
+        wait_for_topic_type "$LIVOX_ADAPTER_DIAGNOSTICS_TOPIC" \
+            diagnostic_msgs/msg/DiagnosticArray 1 1 \
+            || die "Livox adapter diagnostics endpoints did not become ready"
+    fi
+    wait_for_topic /livox/imu 1 1 || die "/livox/imu endpoints did not become ready"
+else
+    wait_for_topic /points_raw 1 1 || die "/points_raw endpoints did not become ready"
+    wait_for_topic /go2w/imu 1 1 || die "/go2w/imu endpoints did not become ready"
     wait_for_topic /points_raw_fastlio 1 1 \
         || die "/points_raw_fastlio endpoints did not become ready"
     wait_for_topic /fastlio_go2w_hesai/diagnostics 1 1 \
@@ -1277,6 +1524,9 @@ SAMPLER_CMD=(
     --output "$METRICS_CSV" --summary "$METRICS_SUMMARY"
     --stop-file "$STOP_FILE" --interval 1.0
 )
+if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+    SAMPLER_CMD+=(--target "livox_adapter:$LAUNCH_PID:livox_pointcloud_adapter")
+fi
 if [ "$SENSOR" = "xt16" ]; then
     SAMPLER_CMD+=(--target "hesai_adapter:$LAUNCH_PID:hesai_pointcloud_adapter")
 fi
@@ -1298,7 +1548,7 @@ if [ -n "$DURATION" ]; then
     WATCHDOG_PID=$!
 fi
 
-PROCESSING_NODE_MISSES=0
+PROCESSING_PROCESS_MISSES=0
 while kill -0 "$PLAYER_PID" 2>/dev/null; do
     kill -0 "$LAUNCH_PID" 2>/dev/null \
         || die "processing launch exited during playback; see launch.log"
@@ -1306,12 +1556,12 @@ while kill -0 "$PLAYER_PID" 2>/dev/null; do
         || die "rosbag recorder exited during playback; see recorder.log"
     kill -0 "$SAMPLER_PID" 2>/dev/null \
         || die "resource sampler exited during playback; see metrics.log"
-    if required_processing_nodes_alive; then
-        PROCESSING_NODE_MISSES=0
+    if required_processing_processes_alive; then
+        PROCESSING_PROCESS_MISSES=0
     else
-        PROCESSING_NODE_MISSES=$((PROCESSING_NODE_MISSES + 1))
-        [ "$PROCESSING_NODE_MISSES" -lt 3 ] \
-            || die "required processing node disappeared during playback"
+        PROCESSING_PROCESS_MISSES=$((PROCESSING_PROCESS_MISSES + 1))
+        [ "$PROCESSING_PROCESS_MISSES" -lt 3 ] \
+            || die "required processing process disappeared during playback"
     fi
     sleep 1
 done
@@ -1330,7 +1580,8 @@ fi
 kill -0 "$LAUNCH_PID" 2>/dev/null || die "processing launch exited before drain"
 kill -0 "$RECORDER_PID" 2>/dev/null || die "rosbag recorder exited before drain"
 kill -0 "$SAMPLER_PID" 2>/dev/null || die "resource sampler exited before drain"
-required_processing_nodes_alive || die "required processing node missing before drain"
+required_processing_processes_alive \
+    || die "required processing process missing before drain"
 
 write_manifest "draining"
 if ! wait_for_processing_quiescence; then
@@ -1354,14 +1605,27 @@ if ! validate_result_bag > "$RESULT_BAG_VALIDATION_LOG" 2>&1; then
 fi
 RESULT_METADATA_SHA256="$(sha256sum "$RESULT_BAG/metadata.yaml" | awk '{print $1}')"
 
+if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+    if ! "${LIVOX_DIAGNOSTICS_CMD[@]}" > "$LIVOX_DIAGNOSTICS_LOG" 2>&1; then
+        tail -n 40 "$LIVOX_DIAGNOSTICS_LOG" >&2 || true
+        die "Livox adapter diagnostics extraction failed"
+    fi
+    [ -s "$LIVOX_ADAPTER_DIAGNOSTICS" ] \
+        || die "Livox adapter diagnostics artifact was not created"
+    LIVOX_ADAPTER_DIAGNOSTICS_SHA256="$(
+        sha256sum "$LIVOX_ADAPTER_DIAGNOSTICS" | awk '{print $1}'
+    )"
+fi
 if [ "$SENSOR" = "xt16" ]; then
-    if ! "${DIAGNOSTICS_CMD[@]}" > "$OUTPUT_DIR/adapter-diagnostics.log" 2>&1; then
-        tail -n 40 "$OUTPUT_DIR/adapter-diagnostics.log" >&2 || true
+    if ! "${HESAI_DIAGNOSTICS_CMD[@]}" > "$HESAI_DIAGNOSTICS_LOG" 2>&1; then
+        tail -n 40 "$HESAI_DIAGNOSTICS_LOG" >&2 || true
         die "Hesai adapter diagnostics extraction failed"
     fi
-    [ -s "$ADAPTER_DIAGNOSTICS" ] \
+    [ -s "$HESAI_ADAPTER_DIAGNOSTICS" ] \
         || die "Hesai adapter diagnostics artifact was not created"
-    ADAPTER_DIAGNOSTICS_SHA256="$(sha256sum "$ADAPTER_DIAGNOSTICS" | awk '{print $1}')"
+    HESAI_ADAPTER_DIAGNOSTICS_SHA256="$(
+        sha256sum "$HESAI_ADAPTER_DIAGNOSTICS" | awk '{print $1}'
+    )"
 fi
 
 if ! validate_resource_artifacts > "$RESOURCE_VALIDATION_LOG" 2>&1; then

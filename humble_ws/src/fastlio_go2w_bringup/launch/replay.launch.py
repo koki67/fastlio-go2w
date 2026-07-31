@@ -7,6 +7,9 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+from fastlio_go2w_bringup.livox_replay import resolve_livox_replay_graph
 
 
 def _play_bag(context, *_args, **_kwargs):
@@ -19,6 +22,45 @@ def _play_bag(context, *_args, **_kwargs):
         cmd.append("--loop")
 
     return [ExecuteProcess(cmd=cmd, output="screen")]
+
+
+def _processing_graph(context, package_share):
+    graph = resolve_livox_replay_graph(
+        LaunchConfiguration("lidar_format").perform(context)
+    )
+    actions = []
+    if graph.adapter_enabled:
+        actions.append(
+            Node(
+                package="fastlio_go2w_livox",
+                executable="livox_pointcloud_adapter",
+                name="livox_pointcloud_adapter",
+                output="screen",
+                parameters=[
+                    {
+                        "use_sim_time": True,
+                        "input_topic": graph.input_topic,
+                        "output_topic": graph.fastlio_topic,
+                        "diagnostics_topic": graph.diagnostics_topic,
+                    }
+                ],
+            )
+        )
+    actions.append(
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(package_share, "launch", "bringup.launch.py")
+            ),
+            launch_arguments={
+                "with_sensors": "false",
+                "use_sim_time": "true",
+                "use_rviz": LaunchConfiguration("rviz"),
+                "config": LaunchConfiguration("config"),
+                "lid_topic_override": graph.fastlio_topic,
+            }.items(),
+        )
+    )
+    return actions
 
 
 def generate_launch_description():
@@ -49,16 +91,11 @@ def generate_launch_description():
             default_value=os.path.join(pkg, "config", "mid360_go2w.yaml"),
             description="FAST-LIO parameter YAML file.",
         ),
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                os.path.join(pkg, "launch", "bringup.launch.py")
-            ),
-            launch_arguments={
-                "with_sensors": "false",
-                "use_sim_time": "true",
-                "use_rviz": LaunchConfiguration("rviz"),
-                "config": LaunchConfiguration("config"),
-            }.items(),
+        DeclareLaunchArgument(
+            "lidar_format",
+            default_value="custom-msg",
+            description="Resolved Livox input format: custom-msg or pointcloud2.",
         ),
+        OpaqueFunction(function=_processing_graph, args=[pkg]),
         OpaqueFunction(function=_play_bag),
     ])

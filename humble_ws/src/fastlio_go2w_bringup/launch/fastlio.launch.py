@@ -4,10 +4,33 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
+
+def _fastlio_node(context):
+    parameters = [
+        LaunchConfiguration("config"),
+        {
+            "use_sim_time": LaunchConfiguration("use_sim_time"),
+            "common.time_sync_en": LaunchConfiguration("time_sync_en"),
+        },
+    ]
+    lid_topic_override = LaunchConfiguration("lid_topic_override").perform(context)
+    if lid_topic_override:
+        parameters.append({"common.lid_topic": lid_topic_override})
+
+    return [
+        Node(
+            package="fast_lio",
+            executable="fastlio_mapping",
+            name="fastlio_mapping",
+            output="screen",
+            parameters=parameters,
+        )
+    ]
 
 
 def generate_launch_description():
@@ -41,19 +64,10 @@ def generate_launch_description():
         default_value="livox_imu_frame",
         description="IMU frame used to rebase FAST-LIO body odometry to base_link.",
     )
-
-    fastlio_node = Node(
-        package="fast_lio",
-        executable="fastlio_mapping",
-        name="fastlio_mapping",
-        output="screen",
-        parameters=[
-            LaunchConfiguration("config"),
-            {
-                "use_sim_time": LaunchConfiguration("use_sim_time"),
-                "common.time_sync_en": LaunchConfiguration("time_sync_en"),
-            },
-        ],
+    lid_topic_override_arg = DeclareLaunchArgument(
+        "lid_topic_override",
+        default_value="",
+        description="Override only common.lid_topic; empty preserves the YAML value.",
     )
 
     odom_adapter_node = Node(
@@ -89,7 +103,8 @@ def generate_launch_description():
         time_sync_arg,
         config_arg,
         imu_frame_arg,
-        fastlio_node,
+        lid_topic_override_arg,
+        OpaqueFunction(function=_fastlio_node),
         odom_adapter_node,
         rviz_node,
     ])

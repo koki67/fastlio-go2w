@@ -190,6 +190,34 @@ bash scripts/fastlio/replay.sh /mnt/go2w-experiment-recorder/bags/raw_YYYYMMDD_H
 bash scripts/fastlio/replay.sh /mnt/fastlio-go2w/bags/raw_YYYYMMDD_HHMMSS
 ```
 
+Replay reads `/livox/lidar` from `metadata.yaml` before starting ROS and prints
+the resolved format. Two exact input types are supported:
+
+| Recorded type | Resolved format | Processing path |
+| --- | --- | --- |
+| `livox_ros_driver2/msg/CustomMsg` | `custom-msg` | Existing FAST-LIO Livox callback, no adapter |
+| `sensor_msgs/msg/PointCloud2` | `pointcloud2` | `/livox/lidar` -> Livox adapter -> `/livox/lidar_fastlio` CustomMsg |
+
+The default `--lidar-format auto` is fail-closed for missing, empty,
+unsupported, or multi-type metadata. An explicit value is useful for operator
+verification, but it must agree with metadata:
+
+```bash
+bash scripts/fastlio/replay.sh "$BAG" --lidar-format pointcloud2
+```
+
+The adapter reads the Livox field schema and per-point absolute nanosecond
+timestamp; it does not assume the current 26-byte stride. Epoch-scale FLOAT64
+timestamps have a 256 ns ULP in the current bags, so a first-point negative
+delta no larger than half an ULP is diagnosed and clamped to zero. Larger
+negative deltas and all other schema, layout, range, or finite-value anomalies
+drop the complete frame.
+
+The PointCloud2 bag is not sent directly to FAST-LIO as `lidar_type=4`: that
+handler does not consume this producer's `timestamp` contract and expects a
+different reflectivity field. XT16 and multi-LiDAR integration remain isolated
+experiments and are not enabled by this MID-360 replay selection.
+
 After pulling this configuration change, use **Dev Containers: Rebuild and
 Reopen in Container** once to apply the new mount.
 
@@ -232,6 +260,10 @@ paused, verifies all processing and recording endpoints, validates the live
 FAST-LIO parameters, and then resumes the bag. The headless configuration
 retains the accuracy tuning while disabling cumulative `/Laser_map`, `/path`,
 the unused body-frame cloud, and FAST-LIO's built-in PCD writer.
+It uses the same metadata detector and `--lidar-format` contract as interactive
+replay. PointCloud2 runs additionally record adapter diagnostics and save the
+final counters as `livox_adapter_diagnostics.json`; CustomMsg runs explicitly
+record that the adapter was disabled in `manifest.json`.
 
 For an existing Pandar XT16 + onboard IMU recording, use the offline-only
 sensor profile. It reads the source bag directly and does not start a Hesai
@@ -258,6 +290,7 @@ A successful analyzed run contains:
 - `trajectory.csv` and `trajectory_camera_init.csv`: frozen trajectories
 - `summary.json`: map, trajectory, resource, and artifact metadata
 - configuration snapshots, hashes, process metrics, and logs
+- for PointCloud2 input, `livox_adapter_diagnostics.json` and its source/runtime hashes
 
 The devcontainer sets
 `FASTLIO_RESULTS_ROOT=/mnt/fastlio-go2w/results`, backed by the host data
@@ -289,6 +322,10 @@ is parallel to the initial robot `base_link` XY plane. Neither visualization
 mode runs FAST-LIO. See the
 [offline result artifact workflow](docs/offline-result-artifacts.md) for
 artifact definitions, validation, comparison, and troubleshooting.
+
+A completed run with finite clouds and odometry establishes software replay
+operation only. It does not establish ground-truth trajectory accuracy,
+Jetson performance, live-hardware behavior, or physical deployment readiness.
 
 ## Attribution
 

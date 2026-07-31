@@ -155,6 +155,24 @@ For `--sensor xt16`, the runner additionally validates:
 The run also saves `sensor_calibration.yaml`, `adapter_diagnostics.json`, the
 adapter executable hash, and the exact applied header offset in manifest.json.
 
+For `--sensor mid360`, the runner accepts exactly
+`livox_ros_driver2/msg/CustomMsg` and `sensor_msgs/msg/PointCloud2` on
+`/livox/lidar`. It rejects a missing topic, zero messages, unsupported or
+multiple types, malformed metadata, and an explicit format that contradicts
+metadata before creating the output directory. Readiness checks verify endpoint
+types as well as counts.
+
+CustomMsg keeps the legacy processing graph. PointCloud2 starts
+`fastlio_go2w_livox`, keeps the source on `/livox/lidar`, and publishes the
+normalized CustomMsg on `/livox/lidar_fastlio`; the graph never exposes two
+types on one topic. Only `common.lid_topic` is overridden, so all other values
+from `--config` remain authoritative.
+
+Direct `lidar_type=4` processing is intentionally not used. The existing
+FAST-LIO PointCloud2 handler does not read this Livox producer's absolute
+`timestamp` field and expects a different reflectivity schema. The boundary
+adapter instead reconstructs the existing Livox CustomMsg time contract.
+
 ## Generated artifacts
 
 Analysis is enabled by default. A successful run contains at least:

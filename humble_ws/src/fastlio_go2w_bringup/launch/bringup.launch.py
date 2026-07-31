@@ -44,6 +44,11 @@ def generate_launch_description():
         default_value="livox_imu_frame",
         description="IMU frame used by the odometry adapter.",
     )
+    lid_topic_override_arg = DeclareLaunchArgument(
+        "lid_topic_override",
+        default_value="",
+        description="Override only FAST-LIO common.lid_topic.",
+    )
 
     robot_description = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -65,6 +70,7 @@ def generate_launch_description():
             "time_sync_en": LaunchConfiguration("time_sync_en"),
             "config": LaunchConfiguration("config"),
             "imu_frame": LaunchConfiguration("imu_frame"),
+            "lid_topic_override": LaunchConfiguration("lid_topic_override"),
         }.items(),
     )
 
@@ -75,6 +81,7 @@ def generate_launch_description():
         time_sync_arg,
         config_arg,
         imu_frame_arg,
+        lid_topic_override_arg,
         robot_description,
         sensors,
         fastlio,
