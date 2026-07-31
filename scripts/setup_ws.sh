@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-if [ ! -d "$REPO_ROOT/.git" ]; then
+if ! git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "Error: this is not a git repository: $REPO_ROOT" >&2
     exit 1
 fi
@@ -33,4 +33,3 @@ if [ -f "$DRIVER_MANIFEST" ]; then
 else
     echo "Warning: livox_ros_driver2 package.xml is still missing." >&2
 fi
-
