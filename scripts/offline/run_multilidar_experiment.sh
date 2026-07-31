@@ -24,6 +24,8 @@ Options:
   --output DIR        Result directory (default: ${FASTLIO_RESULTS_ROOT}/multilidar/<bag>/...)
   --config YAML       Override tuning while preserving the profile input and
                       headless output contract
+  --lidar-format FORMAT
+                      auto, custom-msg, or pointcloud2 (default: auto)
   --debug-cloud       Publish and record /livox/lidar_fused_debug
   --no-analyze        Keep the result bag but skip automatic artifact generation
   --map-voxel-size M  Final map voxel edge length (default: 0.20)
@@ -53,6 +55,7 @@ DOMAIN_ID="77"
 OUTPUT_DIR=""
 DEBUG_CLOUD="false"
 CONFIG_OVERRIDE=""
+LIDAR_FORMAT_OVERRIDE="auto"
 ANALYZE="true"
 MAP_VOXEL_SIZE="0.20"
 PREVIEW_MAX_POINTS="500000"
@@ -87,6 +90,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --config)
             CONFIG_OVERRIDE="${2:?Error: --config requires a value}"
+            shift 2
+            ;;
+        --lidar-format)
+            LIDAR_FORMAT_OVERRIDE="${2:?Error: --lidar-format requires a value}"
             shift 2
             ;;
         --debug-cloud)
@@ -148,6 +155,10 @@ if [ -n "$DURATION" ]; then
         || die "--duration must be greater than zero"
 fi
 [[ "$DOMAIN_ID" =~ ^[0-9]+$ ]] || die "--domain-id must be a non-negative integer"
+case "$LIDAR_FORMAT_OVERRIDE" in
+    auto|custom-msg|pointcloud2) ;;
+    *) die "--lidar-format must be auto, custom-msg, or pointcloud2" ;;
+esac
 
 BAG="$(realpath "$BAG")"
 [ -d "$BAG" ] || die "bag directory not found: $BAG"
@@ -156,6 +167,29 @@ for topic in /livox/lidar /livox/imu /points_raw; do
     grep -Eq "name: ${topic}$" "$BAG/metadata.yaml" \
         || die "required topic $topic is absent from the bag"
 done
+
+FORMAT_DETECTOR="$REPO_ROOT/scripts/fastlio/detect_livox_bag_format.py"
+[ -f "$FORMAT_DETECTOR" ] || die "Livox bag format detector not found: $FORMAT_DETECTOR"
+if ! DETECTED_LIDAR_FORMAT="$(python3 "$FORMAT_DETECTOR" "$BAG/metadata.yaml")"; then
+    die "could not establish a supported Livox input format"
+fi
+if [ "$LIDAR_FORMAT_OVERRIDE" != "auto" ] && \
+   [ "$LIDAR_FORMAT_OVERRIDE" != "$DETECTED_LIDAR_FORMAT" ]; then
+    die "--lidar-format $LIDAR_FORMAT_OVERRIDE conflicts with metadata format $DETECTED_LIDAR_FORMAT"
+fi
+RESOLVED_LIDAR_FORMAT="$DETECTED_LIDAR_FORMAT"
+case "$RESOLVED_LIDAR_FORMAT" in
+    custom-msg)
+        DETECTED_LIDAR_ROS_TYPE="livox_ros_driver2/msg/CustomMsg"
+        FASTLIO_MID_TOPIC="/livox/lidar"
+        LIVOX_ADAPTER_ENABLED="false"
+        ;;
+    pointcloud2)
+        DETECTED_LIDAR_ROS_TYPE="sensor_msgs/msg/PointCloud2"
+        FASTLIO_MID_TOPIC="/livox/lidar_fastlio"
+        LIVOX_ADAPTER_ENABLED="true"
+        ;;
+esac
 
 CONFIG_DIR="$REPO_ROOT/humble_ws/src/fastlio_go2w_bringup/config"
 if [ -n "$CONFIG_OVERRIDE" ]; then
@@ -196,7 +230,7 @@ elif [ "${ROS_DISTRO:-}" != "humble" ]; then
     die "ROS 2 Humble is required (run this inside the project container)"
 fi
 
-for command in ros2 setsid python3 sha256sum cp git realpath; do
+for command in ros2 setsid pgrep python3 sha256sum cp git realpath; do
     command -v "$command" >/dev/null || die "required command not found: $command"
 done
 python3 -c 'import yaml' >/dev/null 2>&1 \
@@ -215,13 +249,14 @@ fi
 candidate_is_usable() {
     local candidate="$1"
     local install_root bringup_prefix launch_runtime fastlio_runtime
-    local odom_runtime fusion_runtime
+    local odom_runtime fusion_runtime adapter_runtime
     install_root="$(dirname "$candidate")"
     bringup_prefix="$install_root/fastlio_go2w_bringup"
     launch_runtime="$bringup_prefix/share/fastlio_go2w_bringup/launch/offline_multilidar.launch.py"
     fastlio_runtime="$install_root/fast_lio/lib/fast_lio/fastlio_mapping"
     odom_runtime="$bringup_prefix/lib/fastlio_go2w_bringup/fastlio_odom_adapter"
     fusion_runtime="$install_root/fastlio_go2w_fusion/lib/fastlio_go2w_fusion/dual_lidar_fusion_node"
+    adapter_runtime="$install_root/fastlio_go2w_livox/lib/fastlio_go2w_livox/livox_pointcloud_adapter"
 
     [ -f "$candidate" ] || return 1
     [ -f "$launch_runtime" ] || return 1
@@ -231,6 +266,9 @@ candidate_is_usable() {
         || return 1
     if [ "$PROFILE" != "baseline" ]; then
         [ -x "$fusion_runtime" ] || return 1
+    fi
+    if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+        [ -x "$adapter_runtime" ] || return 1
     fi
 
     (
@@ -244,6 +282,10 @@ candidate_is_usable() {
         if [ "$PROFILE" != "baseline" ]; then
             [ "$(ros2 pkg prefix fastlio_go2w_fusion 2>/dev/null)" \
                 = "$install_root/fastlio_go2w_fusion" ] || exit 1
+        fi
+        if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+            [ "$(ros2 pkg prefix fastlio_go2w_livox 2>/dev/null)" \
+                = "$install_root/fastlio_go2w_livox" ] || exit 1
         fi
     )
 }
@@ -271,6 +313,12 @@ FASTLIO_RUNTIME="$INSTALL_ROOT/fast_lio/lib/fast_lio/fastlio_mapping"
 ODOM_ADAPTER_RUNTIME="$BRINGUP_PREFIX/lib/fastlio_go2w_bringup/fastlio_odom_adapter"
 FASTLIO_RUNTIME_SHA256="$(sha256sum "$FASTLIO_RUNTIME" | awk '{print $1}')"
 ODOM_ADAPTER_RUNTIME_SHA256="$(sha256sum "$ODOM_ADAPTER_RUNTIME" | awk '{print $1}')"
+LIVOX_ADAPTER_RUNTIME=""
+LIVOX_ADAPTER_RUNTIME_SHA256=""
+if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+    LIVOX_ADAPTER_RUNTIME="$INSTALL_ROOT/fastlio_go2w_livox/lib/fastlio_go2w_livox/livox_pointcloud_adapter"
+    LIVOX_ADAPTER_RUNTIME_SHA256="$(sha256sum "$LIVOX_ADAPTER_RUNTIME" | awk '{print $1}')"
+fi
 FUSION_RUNTIME=""
 FUSION_RUNTIME_SHA256=""
 if [ "$PROFILE" != "baseline" ]; then
@@ -360,6 +408,12 @@ write_manifest() {
     EXP_BAG="$BAG" EXP_PROFILE="$PROFILE" EXP_START_OFFSET="$START_OFFSET" \
     EXP_DURATION="$DURATION" EXP_RATE="$RATE" EXP_DOMAIN_ID="$DOMAIN_ID" \
     EXP_DEBUG_CLOUD="$DEBUG_CLOUD" EXP_STARTED_AT="$RUN_STARTED_AT" \
+    EXP_LIDAR_ROS_TYPE="$DETECTED_LIDAR_ROS_TYPE" \
+    EXP_DETECTED_LIDAR_FORMAT="$DETECTED_LIDAR_FORMAT" \
+    EXP_RESOLVED_LIDAR_FORMAT="$RESOLVED_LIDAR_FORMAT" \
+    EXP_LIDAR_FORMAT_OVERRIDE="$LIDAR_FORMAT_OVERRIDE" \
+    EXP_FASTLIO_MID_TOPIC="$FASTLIO_MID_TOPIC" \
+    EXP_LIVOX_ADAPTER_ENABLED="$LIVOX_ADAPTER_ENABLED" \
     EXP_CONFIG="$FASTLIO_CONFIG" EXP_CONFIG_SHA="$CONFIG_SHA256" \
     EXP_FUSION_PARAMETERS="$FUSION_PARAMETERS_SNAPSHOT" \
     EXP_FUSION_PARAMETERS_SHA="$FUSION_PARAMETERS_SHA256" \
@@ -374,6 +428,8 @@ write_manifest() {
     EXP_FASTLIO_RUNTIME_SHA="$FASTLIO_RUNTIME_SHA256" \
     EXP_ODOM_RUNTIME="$ODOM_ADAPTER_RUNTIME" \
     EXP_ODOM_RUNTIME_SHA="$ODOM_ADAPTER_RUNTIME_SHA256" \
+    EXP_LIVOX_ADAPTER_RUNTIME="$LIVOX_ADAPTER_RUNTIME" \
+    EXP_LIVOX_ADAPTER_RUNTIME_SHA="$LIVOX_ADAPTER_RUNTIME_SHA256" \
     EXP_FUSION_RUNTIME="$FUSION_RUNTIME" \
     EXP_FUSION_RUNTIME_SHA="$FUSION_RUNTIME_SHA256" \
     EXP_LAUNCH_PID="$LAUNCH_PID" EXP_RECORDER_PID="$RECORDER_PID" \
@@ -486,6 +542,8 @@ document = {
     "bag": {
         "path": env["EXP_BAG"],
         "metadata_sha256": env["EXP_METADATA_SHA"],
+        "lidar_ros_type": env["EXP_LIDAR_ROS_TYPE"],
+        "detected_lidar_format": env["EXP_DETECTED_LIDAR_FORMAT"],
     },
     "profile": profile,
     "playback": {
@@ -520,6 +578,18 @@ document = {
         "pcd_save_en": False,
         "runtime_pos_log_enable": False,
     },
+    "livox_input": {
+        "format_override": env["EXP_LIDAR_FORMAT_OVERRIDE"],
+        "detected_format": env["EXP_DETECTED_LIDAR_FORMAT"],
+        "resolved_format": env["EXP_RESOLVED_LIDAR_FORMAT"],
+        "ros_type": env["EXP_LIDAR_ROS_TYPE"],
+        "adapter_enabled": env["EXP_LIVOX_ADAPTER_ENABLED"] == "true",
+        "adapter_output_topic": (
+            env["EXP_FASTLIO_MID_TOPIC"]
+            if env["EXP_LIVOX_ADAPTER_ENABLED"] == "true"
+            else None
+        ),
+    },
     "fusion": fusion,
     "analysis": analysis_details,
     "publish_debug_cloud": env["EXP_DEBUG_CLOUD"] == "true",
@@ -541,6 +611,14 @@ document = {
             "sha256": env["EXP_ODOM_RUNTIME_SHA"],
         },
         "fusion": fusion_runtime,
+        "livox_adapter": (
+            {
+                "path": env["EXP_LIVOX_ADAPTER_RUNTIME"],
+                "sha256": env["EXP_LIVOX_ADAPTER_RUNTIME_SHA"],
+            }
+            if env["EXP_LIVOX_ADAPTER_ENABLED"] == "true"
+            else None
+        ),
     },
     "process_ids": {
         "launch": optional_int(env["EXP_LAUNCH_PID"]),
@@ -681,6 +759,22 @@ wait_for_topic() {
     return 1
 }
 
+dump_node_parameters() {
+    local node="$1"
+    local expected_file="$2"
+    local deadline=$((SECONDS + 30))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        kill -0 "$LAUNCH_PID" 2>/dev/null || return 1
+        if ros2 param dump --no-daemon --output-dir "$OUTPUT_DIR" "$node" \
+            >> "$PARAMETER_DUMP_LOG" 2>&1 \
+            && [ -s "$expected_file" ]; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    return 1
+}
+
 assert_fastlio_parameter() {
     local name="$1"
     local expected="$2"
@@ -698,7 +792,7 @@ assert_fastlio_parameter() {
 validate_fastlio_parameters() {
     local expected_lid_topic expected_scan_line
     if [ "$PROFILE" = "baseline" ]; then
-        expected_lid_topic="/livox/lidar"
+        expected_lid_topic="$FASTLIO_MID_TOPIC"
         expected_scan_line="4"
     else
         expected_lid_topic="/livox/lidar_fused"
@@ -716,16 +810,18 @@ validate_fastlio_parameters() {
     assert_fastlio_parameter runtime_pos_log_enable False || return 1
 }
 
-required_processing_nodes_alive() {
-    local nodes
-    local required=(/fastlio_mapping /fastlio_odom_adapter)
+required_processing_processes_alive() {
+    local required=(fastlio_mapping fastlio_odom_adapter)
+    local process_name
     if [ "$PROFILE" != "baseline" ]; then
-        required+=(/dual_lidar_fusion)
+        required+=(dual_lidar_fusion_node)
+    fi
+    if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+        required+=(livox_pointcloud_adapter)
     fi
 
-    nodes="$(ros2 node list --no-daemon 2>/dev/null)" || return 1
-    for node in "${required[@]}"; do
-        grep -Fxq "$node" <<<"$nodes" || return 1
+    for process_name in "${required[@]}"; do
+        pgrep -g "$LAUNCH_PID" -f -- "$process_name" >/dev/null || return 1
     done
     return 0
 }
@@ -756,7 +852,7 @@ wait_for_processing_quiescence() {
     local stable_since="$SECONDS"
     local previous_signature=""
     local signature current_size current_mtime elapsed stable_elapsed
-    local node_misses=0
+    local process_misses=0
 
     DRAIN_OUTCOME="waiting"
     DRAIN_ELAPSED_SECONDS="0"
@@ -782,14 +878,14 @@ wait_for_processing_quiescence() {
             return 1
         fi
 
-        if required_processing_nodes_alive; then
-            node_misses=0
+        if required_processing_processes_alive; then
+            process_misses=0
         else
-            node_misses=$((node_misses + 1))
-            if [ "$node_misses" -ge 3 ]; then
-                DRAIN_OUTCOME="processing_node_missing"
+            process_misses=$((process_misses + 1))
+            if [ "$process_misses" -ge 3 ]; then
+                DRAIN_OUTCOME="processing_process_missing"
                 DRAIN_ELAPSED_SECONDS="$((SECONDS - started_at))"
-                echo "Required processing node disappeared while waiting for quiescence." >&2
+                echo "Required processing process disappeared while waiting for quiescence." >&2
                 return 1
             fi
         fi
@@ -846,7 +942,7 @@ validate_result_bag() {
     ros2 bag info "$RESULT_BAG"
     echo
     echo "metadata and reader validation:"
-    python3 - "$RESULT_BAG" "$PROFILE" "$DEBUG_CLOUD" <<'PY'
+    python3 - "$RESULT_BAG" "$PROFILE" "$DEBUG_CLOUD" "$LIVOX_ADAPTER_ENABLED" <<'PY'
 from pathlib import Path
 import json
 import sys
@@ -857,6 +953,7 @@ import yaml
 root = Path(sys.argv[1]).resolve()
 profile = sys.argv[2]
 debug_cloud = sys.argv[3] == "true"
+adapter_enabled = sys.argv[4] == "true"
 metadata_path = root / "metadata.yaml"
 
 try:
@@ -933,6 +1030,8 @@ if profile != "baseline":
     required.append("/fastlio_go2w_fusion/diagnostics")
     if debug_cloud:
         required.append("/livox/lidar_fused_debug")
+if adapter_enabled:
+    required.append("/fastlio_go2w_livox/diagnostics")
 missing = [name for name in required if counts.get(name, 0) <= 0]
 if missing:
     raise SystemExit(
@@ -979,7 +1078,7 @@ PY
 }
 
 validate_resource_artifacts() {
-    python3 - "$METRICS_CSV" "$METRICS_SUMMARY" "$PROFILE" <<'PY'
+    python3 - "$METRICS_CSV" "$METRICS_SUMMARY" "$PROFILE" "$LIVOX_ADAPTER_ENABLED" <<'PY'
 from collections import Counter
 from pathlib import Path
 import csv
@@ -992,6 +1091,8 @@ profile = sys.argv[3]
 required = {"fastlio", "player", "recorder"}
 if profile != "baseline":
     required.add("fusion")
+if sys.argv[4] == "true":
+    required.add("livox_adapter")
 
 if not csv_path.is_file() or csv_path.stat().st_size <= 0:
     raise SystemExit(f"resource metrics CSV is missing or empty: {csv_path}")
@@ -1085,11 +1186,15 @@ PY
 LAUNCH_CMD=(
     ros2 launch fastlio_go2w_bringup offline_multilidar.launch.py
     "profile:=$PROFILE" "config:=$FASTLIO_CONFIG_SNAPSHOT"
+    "lidar_format:=$RESOLVED_LIDAR_FORMAT"
     "publish_debug_cloud:=$DEBUG_CLOUD"
 )
 RECORD_TOPICS=(/odom /Odometry /cloud_registered /fastlio_go2w_fusion/diagnostics)
 if [ "$DEBUG_CLOUD" = "true" ]; then
     RECORD_TOPICS+=(/livox/lidar_fused_debug)
+fi
+if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+    RECORD_TOPICS+=(/fastlio_go2w_livox/diagnostics)
 fi
 RECORDER_CMD=(ros2 bag record --use-sim-time -o "$RESULT_BAG" "${RECORD_TOPICS[@]}")
 PLAYER_CMD=(
@@ -1122,6 +1227,9 @@ write_manifest "starting"
 echo "Starting $PROFILE experiment in ROS domain $ROS_DOMAIN_ID"
 echo "Bag: $BAG"
 echo "Output: $OUTPUT_DIR"
+echo "Livox metadata type: $DETECTED_LIDAR_ROS_TYPE"
+echo "Resolved Livox format: $RESOLVED_LIDAR_FORMAT"
+echo "Livox adapter enabled: $LIVOX_ADAPTER_ENABLED"
 
 setsid "${LAUNCH_CMD[@]}" > "$OUTPUT_DIR/launch.log" 2>&1 &
 LAUNCH_PID=$!
@@ -1135,9 +1243,12 @@ wait_for_node /fastlio_odom_adapter || die "odom adapter did not become ready; s
 if [ "$PROFILE" != "baseline" ]; then
     wait_for_node /dual_lidar_fusion || die "fusion node did not become ready; see launch.log"
 fi
-ros2 param dump --no-daemon --output-dir "$OUTPUT_DIR" /fastlio_mapping \
-    > "$PARAMETER_DUMP_LOG" 2>&1
-[ -s "$FASTLIO_PARAMETERS_SNAPSHOT" ] \
+if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+    wait_for_node /livox_pointcloud_adapter \
+        || die "Livox adapter did not become ready; see launch.log"
+fi
+: > "$PARAMETER_DUMP_LOG"
+dump_node_parameters /fastlio_mapping "$FASTLIO_PARAMETERS_SNAPSHOT" \
     || die "FAST-LIO parameter snapshot was not created"
 validate_fastlio_parameters \
     > "$PARAMETER_VALIDATION_LOG" 2>&1 \
@@ -1149,6 +1260,12 @@ FASTLIO_PARAMETERS_SHA256="$(sha256sum "$FASTLIO_PARAMETERS_SNAPSHOT" | awk '{pr
 wait_for_service /rosbag2_player/resume || die "rosbag player resume service did not appear"
 
 wait_for_topic /livox/lidar 1 1 || die "/livox/lidar endpoints did not become ready"
+if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+    wait_for_topic /livox/lidar_fastlio 1 1 \
+        || die "/livox/lidar_fastlio endpoints did not become ready"
+    wait_for_topic /fastlio_go2w_livox/diagnostics 1 1 \
+        || die "Livox adapter diagnostics endpoints did not become ready"
+fi
 wait_for_topic /livox/imu 1 1 || die "/livox/imu endpoints did not become ready"
 if [ "$PROFILE" = "baseline" ]; then
     wait_for_topic /points_raw 1 0 || die "/points_raw publisher did not become ready"
@@ -1162,13 +1279,10 @@ wait_for_topic /Odometry 1 1 || die "/Odometry endpoints did not become ready"
 wait_for_topic /odom 1 1 || die "/odom endpoints did not become ready"
 wait_for_topic /cloud_registered 1 1 || die "/cloud_registered endpoints did not become ready"
 if [ "$PROFILE" != "baseline" ]; then
-    ros2 param dump --no-daemon --output-dir "$OUTPUT_DIR" /dual_lidar_fusion \
-        >> "$PARAMETER_DUMP_LOG" 2>&1
-    [ -s "$FUSION_PARAMETERS_SNAPSHOT" ] \
+    dump_node_parameters /dual_lidar_fusion "$FUSION_PARAMETERS_SNAPSHOT" \
         || die "fusion parameter snapshot was not created"
     FUSION_PARAMETERS_SHA256="$(sha256sum "$FUSION_PARAMETERS_SNAPSHOT" | awk '{print $1}')"
 fi
-
 SAMPLER_CMD=(
     python3 "$SCRIPT_DIR/sample_process_metrics.py"
     --target "fastlio:$LAUNCH_PID:fastlio_mapping"
@@ -1179,6 +1293,9 @@ SAMPLER_CMD=(
 )
 if [ "$PROFILE" != "baseline" ]; then
     SAMPLER_CMD+=(--target "fusion:$LAUNCH_PID:dual_lidar_fusion_node")
+fi
+if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
+    SAMPLER_CMD+=(--target "livox_adapter:$LAUNCH_PID:livox_pointcloud_adapter")
 fi
 setsid "${SAMPLER_CMD[@]}" > "$OUTPUT_DIR/metrics.log" 2>&1 &
 SAMPLER_PID=$!
@@ -1198,7 +1315,7 @@ if [ -n "$DURATION" ]; then
     WATCHDOG_PID=$!
 fi
 
-PROCESSING_NODE_MISSES=0
+PROCESSING_PROCESS_MISSES=0
 while kill -0 "$PLAYER_PID" 2>/dev/null; do
     kill -0 "$LAUNCH_PID" 2>/dev/null \
         || die "processing launch exited during playback; see launch.log"
@@ -1206,12 +1323,12 @@ while kill -0 "$PLAYER_PID" 2>/dev/null; do
         || die "rosbag recorder exited during playback; see recorder.log"
     kill -0 "$SAMPLER_PID" 2>/dev/null \
         || die "resource sampler exited during playback; see metrics.log"
-    if required_processing_nodes_alive; then
-        PROCESSING_NODE_MISSES=0
+    if required_processing_processes_alive; then
+        PROCESSING_PROCESS_MISSES=0
     else
-        PROCESSING_NODE_MISSES=$((PROCESSING_NODE_MISSES + 1))
-        [ "$PROCESSING_NODE_MISSES" -lt 3 ] \
-            || die "required processing node disappeared during playback"
+        PROCESSING_PROCESS_MISSES=$((PROCESSING_PROCESS_MISSES + 1))
+        [ "$PROCESSING_PROCESS_MISSES" -lt 3 ] \
+            || die "required processing process disappeared during playback"
     fi
     sleep 1
 done
@@ -1230,7 +1347,7 @@ fi
 kill -0 "$LAUNCH_PID" 2>/dev/null || die "processing launch exited before drain"
 kill -0 "$RECORDER_PID" 2>/dev/null || die "rosbag recorder exited before drain"
 kill -0 "$SAMPLER_PID" 2>/dev/null || die "resource sampler exited before drain"
-required_processing_nodes_alive || die "required processing node missing before drain"
+required_processing_processes_alive || die "required processing process missing before drain"
 
 write_manifest "draining"
 if ! wait_for_processing_quiescence; then
