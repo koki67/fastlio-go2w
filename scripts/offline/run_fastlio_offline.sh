@@ -208,7 +208,7 @@ elif [ "${ROS_DISTRO:-}" != "humble" ]; then
     die "ROS 2 Humble is required (run this inside the project container)"
 fi
 
-for command in ros2 setsid python3 sha256sum cp git realpath; do
+for command in ros2 setsid pgrep python3 sha256sum cp git realpath; do
     command -v "$command" >/dev/null || die "required command not found: $command"
 done
 python3 -c 'import yaml' >/dev/null 2>&1 \
@@ -832,6 +832,22 @@ wait_for_topic_type() {
     return 1
 }
 
+dump_node_parameters() {
+    local node="$1"
+    local expected_file="$2"
+    local deadline=$((SECONDS + 30))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        kill -0 "$LAUNCH_PID" 2>/dev/null || return 1
+        if ros2 param dump --no-daemon --output-dir "$OUTPUT_DIR" "$node" \
+            >> "$PARAMETER_DUMP_LOG" 2>&1 \
+            && [ -s "$expected_file" ]; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    return 1
+}
+
 assert_fastlio_parameter() {
     local name="$1"
     local expected="$2"
@@ -868,15 +884,16 @@ validate_fastlio_parameters() {
     assert_fastlio_parameter runtime_pos_log_enable False || return 1
 }
 
-required_processing_nodes_alive() {
-    local nodes
-    nodes="$(ros2 node list --no-daemon 2>/dev/null)" || return 1
-    for node in /fastlio_mapping /fastlio_odom_adapter; do
-        grep -Fxq "$node" <<<"$nodes" || return 1
-    done
+required_processing_processes_alive() {
+    local required=(fastlio_mapping fastlio_odom_adapter)
+    local process_name
     if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
-        grep -Fxq /livox_pointcloud_adapter <<<"$nodes" || return 1
+        required+=(livox_pointcloud_adapter)
     fi
+
+    for process_name in "${required[@]}"; do
+        pgrep -g "$LAUNCH_PID" -f -- "$process_name" >/dev/null || return 1
+    done
     return 0
 }
 
@@ -906,7 +923,7 @@ wait_for_processing_quiescence() {
     local stable_since="$SECONDS"
     local previous_signature=""
     local signature current_size current_mtime elapsed stable_elapsed
-    local node_misses=0
+    local process_misses=0
 
     DRAIN_OUTCOME="waiting"
     DRAIN_ELAPSED_SECONDS="0"
@@ -932,14 +949,14 @@ wait_for_processing_quiescence() {
             return 1
         fi
 
-        if required_processing_nodes_alive; then
-            node_misses=0
+        if required_processing_processes_alive; then
+            process_misses=0
         else
-            node_misses=$((node_misses + 1))
-            if [ "$node_misses" -ge 3 ]; then
-                DRAIN_OUTCOME="processing_node_missing"
+            process_misses=$((process_misses + 1))
+            if [ "$process_misses" -ge 3 ]; then
+                DRAIN_OUTCOME="processing_process_missing"
                 DRAIN_ELAPSED_SECONDS="$((SECONDS - started_at))"
-                echo "Required processing node disappeared while waiting for quiescence." >&2
+                echo "Required processing process disappeared while waiting for quiescence." >&2
                 return 1
             fi
         fi
@@ -1296,9 +1313,8 @@ if [ "$LIVOX_ADAPTER_ENABLED" = "true" ]; then
     wait_for_node /livox_pointcloud_adapter \
         || die "Livox adapter did not become ready; see launch.log"
 fi
-ros2 param dump --no-daemon --output-dir "$OUTPUT_DIR" /fastlio_mapping \
-    > "$PARAMETER_DUMP_LOG" 2>&1
-[ -s "$FASTLIO_PARAMETERS_SNAPSHOT" ] \
+: > "$PARAMETER_DUMP_LOG"
+dump_node_parameters /fastlio_mapping "$FASTLIO_PARAMETERS_SNAPSHOT" \
     || die "FAST-LIO parameter snapshot was not created"
 validate_fastlio_parameters \
     > "$PARAMETER_VALIDATION_LOG" 2>&1 \
@@ -1352,7 +1368,7 @@ if [ -n "$DURATION" ]; then
     WATCHDOG_PID=$!
 fi
 
-PROCESSING_NODE_MISSES=0
+PROCESSING_PROCESS_MISSES=0
 while kill -0 "$PLAYER_PID" 2>/dev/null; do
     kill -0 "$LAUNCH_PID" 2>/dev/null \
         || die "processing launch exited during playback; see launch.log"
@@ -1360,12 +1376,12 @@ while kill -0 "$PLAYER_PID" 2>/dev/null; do
         || die "rosbag recorder exited during playback; see recorder.log"
     kill -0 "$SAMPLER_PID" 2>/dev/null \
         || die "resource sampler exited during playback; see metrics.log"
-    if required_processing_nodes_alive; then
-        PROCESSING_NODE_MISSES=0
+    if required_processing_processes_alive; then
+        PROCESSING_PROCESS_MISSES=0
     else
-        PROCESSING_NODE_MISSES=$((PROCESSING_NODE_MISSES + 1))
-        [ "$PROCESSING_NODE_MISSES" -lt 3 ] \
-            || die "required processing node disappeared during playback"
+        PROCESSING_PROCESS_MISSES=$((PROCESSING_PROCESS_MISSES + 1))
+        [ "$PROCESSING_PROCESS_MISSES" -lt 3 ] \
+            || die "required processing process disappeared during playback"
     fi
     sleep 1
 done
@@ -1384,7 +1400,8 @@ fi
 kill -0 "$LAUNCH_PID" 2>/dev/null || die "processing launch exited before drain"
 kill -0 "$RECORDER_PID" 2>/dev/null || die "rosbag recorder exited before drain"
 kill -0 "$SAMPLER_PID" 2>/dev/null || die "resource sampler exited before drain"
-required_processing_nodes_alive || die "required processing node missing before drain"
+required_processing_processes_alive \
+    || die "required processing process missing before drain"
 
 write_manifest "draining"
 if ! wait_for_processing_quiescence; then
