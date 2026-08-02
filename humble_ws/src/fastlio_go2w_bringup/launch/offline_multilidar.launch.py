@@ -20,6 +20,7 @@ from fastlio_go2w_bringup.livox_replay import resolve_livox_replay_graph
 
 _PROFILES = {
     "baseline": None,
+    "fused-full": {"mid_point_stride": 1, "hesai_firing_stride": 1},
     "fused-high": {"mid_point_stride": 3, "hesai_firing_stride": 3},
     "fused-matched": {"mid_point_stride": 6, "hesai_firing_stride": 22},
 }
@@ -140,7 +141,10 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "profile",
                 default_value="baseline",
-                description="Experiment profile: baseline, fused-high, or fused-matched.",
+                description=(
+                    "Experiment profile: baseline, fused-full, fused-high, or "
+                    "fused-matched."
+                ),
             ),
             DeclareLaunchArgument(
                 "config",

@@ -41,6 +41,7 @@ def test_help_does_not_require_a_bag():
     assert completed.returncode == 0
     assert "--lidar-format" in completed.stdout
     assert "--profile" in completed.stdout
+    assert "fused-full" in completed.stdout
     assert "fused-matched" in completed.stdout
 
 

@@ -218,11 +218,12 @@ different reflectivity field. XT16 and multi-LiDAR integration remain isolated
 behind the explicit experimental profiles described below; the default
 `legacy` profile remains MID-360-only.
 
-This branch additionally provides three controlled replay profiles:
+This branch additionally provides four controlled replay profiles:
 
 | Profile | Processing input |
 | --- | --- |
 | `baseline` | MID-360 only |
+| `fused-full` | MID-360 + Pandar XT16, stride 1 for both inputs |
 | `fused-high` | MID-360 + Pandar XT16, higher retained density |
 | `fused-matched` | MID-360 + Pandar XT16, density-matched sampling |
 
@@ -234,6 +235,7 @@ each profile for an interactive comparison:
 ```bash
 BAG=/mnt/go2w-experiment-recorder/bags/experiment_long3_20260714_014823
 bash scripts/fastlio/replay.sh "$BAG" --profile baseline
+bash scripts/fastlio/replay.sh "$BAG" --profile fused-full
 bash scripts/fastlio/replay.sh "$BAG" --profile fused-high
 bash scripts/fastlio/replay.sh "$BAG" --profile fused-matched
 ```
@@ -351,6 +353,10 @@ bash scripts/offline/run_multilidar_experiment.sh \
   "$BAG" --profile fused-matched --rate 1.0 --output "$OUT"
 bash scripts/offline/visualize_multilidar_run.sh "$OUT"
 ```
+
+When `--output` is omitted, the run directory is named
+`<profile>-<UTC timestamp>` (for example,
+`fused-matched-20260801T163403Z`) beneath the bag-specific results directory.
 
 The batch multi-LiDAR runner currently retains its original CustomMsg input
 contract. The interactive replay command above supports both recorded MID-360

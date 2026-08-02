@@ -18,7 +18,7 @@ from launch_ros.actions import Node
 from fastlio_go2w_bringup.livox_replay import resolve_livox_replay_graph
 
 
-_OFFLINE_PROFILES = {"baseline", "fused-high", "fused-matched"}
+_OFFLINE_PROFILES = {"baseline", "fused-full", "fused-high", "fused-matched"}
 
 
 def _processing(context, package_share):
@@ -141,7 +141,8 @@ def generate_launch_description():
                 "profile",
                 default_value="legacy",
                 description=(
-                    "Replay profile: legacy, baseline, fused-high, or fused-matched."
+                    "Replay profile: legacy, baseline, fused-full, fused-high, or "
+                    "fused-matched."
                 ),
             ),
             DeclareLaunchArgument(

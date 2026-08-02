@@ -13,6 +13,7 @@ Usage:
 
 Profiles:
   baseline       MID-360 only, using the accuracy-tuned FAST-LIO configuration
+  fused-full     MID-360 stride 1 plus XT16 firing stride 1
   fused-high     MID-360 stride 3 plus XT16 firing stride 3
   fused-matched  MID-360 stride 6 plus XT16 firing stride 22
 
@@ -21,7 +22,7 @@ Options:
   --duration SEC      Approximate bag seconds via wall timer (smoke tests only)
   --rate RATE         Rosbag playback multiplier (default: 1.0)
   --domain-id ID      Isolated ROS domain ID (default: 77)
-  --output DIR        Result directory (default: ${FASTLIO_RESULTS_ROOT}/multilidar/<bag>/...)
+  --output DIR        Result directory (default: ${FASTLIO_RESULTS_ROOT}/multilidar/<bag>/<profile>-<UTC timestamp>)
   --config YAML       Override tuning while preserving the profile input and
                       headless output contract
   --lidar-format FORMAT
@@ -133,7 +134,7 @@ done
 
 [ -n "$BAG" ] || die "a bag directory is required"
 case "$PROFILE" in
-    baseline|fused-high|fused-matched) ;;
+    baseline|fused-full|fused-high|fused-matched) ;;
     "") die "--profile is required" ;;
     *) die "unknown profile '$PROFILE'" ;;
 esac
@@ -214,7 +215,7 @@ fi
 if [ -z "$OUTPUT_DIR" ]; then
     BAG_NAME="$(basename "$BAG")"
     RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-    OUTPUT_DIR="$(realpath -m "${FASTLIO_RESULTS_ROOT}/multilidar/$BAG_NAME/${RUN_STAMP}-${PROFILE}")"
+    OUTPUT_DIR="$(realpath -m "${FASTLIO_RESULTS_ROOT}/multilidar/$BAG_NAME/${PROFILE}-${RUN_STAMP}")"
 else
     OUTPUT_DIR="$(realpath -m "$OUTPUT_DIR")"
 fi

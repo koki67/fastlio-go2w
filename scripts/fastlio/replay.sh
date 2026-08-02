@@ -6,7 +6,7 @@
 #     [--rate RATE] [--config YAML] [--debug-cloud]
 #     [--lidar-format auto|custom-msg|pointcloud2]
 #
-# Profiles: legacy (default), baseline, fused-high, fused-matched
+# Profiles: legacy (default), baseline, fused-full, fused-high, fused-matched
 
 set -euo pipefail
 
@@ -74,7 +74,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$PROFILE" in
-    legacy|baseline|fused-high|fused-matched) ;;
+    legacy|baseline|fused-full|fused-high|fused-matched) ;;
     *)
         echo "Error: unknown profile: $PROFILE" >&2
         exit 1
@@ -157,7 +157,7 @@ fi
 case "$PROFILE" in
     legacy) DEFAULT_CONFIG_NAME="mid360_go2w.yaml" ;;
     baseline) DEFAULT_CONFIG_NAME="mid360_go2w_accuracy_dense_false.yaml" ;;
-    fused-high|fused-matched)
+    fused-full|fused-high|fused-matched)
         DEFAULT_CONFIG_NAME="mid360_xt16_fused_accuracy_dense_false.yaml"
         ;;
 esac
@@ -201,7 +201,8 @@ candidate_is_usable() {
         [ "$(sha256sum "$offline_multilidar_runtime" | awk '{print $1}')" = \
           "$OFFLINE_MULTILIDAR_SOURCE_SHA256" ] || return 1
     fi
-    if [ "$PROFILE" = "fused-high" ] || [ "$PROFILE" = "fused-matched" ]; then
+    if [ "$PROFILE" = "fused-full" ] || [ "$PROFILE" = "fused-high" ] \
+        || [ "$PROFILE" = "fused-matched" ]; then
         fusion_runtime="$install_root/fastlio_go2w_fusion/lib/fastlio_go2w_fusion/dual_lidar_fusion_node"
         [ -x "$fusion_runtime" ] || return 1
     fi
@@ -219,7 +220,8 @@ candidate_is_usable() {
             [ "$(ros2 pkg prefix fastlio_go2w_livox 2>/dev/null)" = \
               "$install_root/fastlio_go2w_livox" ] || exit 1
         fi
-        if [ "$PROFILE" = "fused-high" ] || [ "$PROFILE" = "fused-matched" ]; then
+        if [ "$PROFILE" = "fused-full" ] || [ "$PROFILE" = "fused-high" ] \
+            || [ "$PROFILE" = "fused-matched" ]; then
             [ "$(ros2 pkg prefix fastlio_go2w_fusion 2>/dev/null)" = \
               "$install_root/fastlio_go2w_fusion" ] || exit 1
         fi
