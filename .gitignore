@@ -16,3 +16,4 @@ __pycache__/
 .vscode/
 /results/fastlio/
 /results/multilidar/
+/results/xt16-validation/
