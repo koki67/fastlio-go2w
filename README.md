@@ -51,6 +51,7 @@ fastlio-go2w/
 │   └── offline/
 │       ├── run_fastlio_offline.sh
 │       ├── run_multilidar_experiment.sh
+│       ├── view_raw_scans.sh
 │       ├── publish_offline_frame_alignment.py
 │       ├── replay_fastlio_artifacts.py
 │       ├── visualize_fastlio_run.sh
@@ -165,6 +166,50 @@ bash scripts/fastlio/live_rviz.sh
 `live_rviz.sh` defaults to the interface `enp97s0`. If your desktop uses a different interface, specify it via `--iface`.
 
 Use the desktop interface connected to the robot Wi-Fi network and the same `ROS_DOMAIN_ID` as the robot container.
+
+### View raw current scans without FAST-LIO
+
+The current recorder bags store both LiDAR clouds as PointCloud2, so they can
+be displayed directly without FAST-LIO, registration, or map accumulation:
+
+```bash
+BAG=/mnt/go2w-experiment-recorder/bags/experiment_corridor-zigzag-one_20260801_090747
+bash scripts/offline/view_raw_scans.sh "$BAG" --loop
+```
+
+When running on the host rather than in the devcontainer, use the host path
+under `/mnt/data1/experimental_data/go2w-experiment-recorder/bags/` instead.
+The script sources an installed ROS 2 desktop environment when necessary and
+does not require this colcon workspace to be built.
+
+RViz starts with two independent displays enabled:
+
+- `MID-360 current scan (cyan)` reads `/livox/lidar`.
+- `XT16 current scan (orange)` reads `/points_raw`.
+
+Use the checkboxes in the RViz Displays panel to show either sensor alone or
+both together. Each display has `Decay Time: 0`; a new PointCloud2 message
+replaces the previous scan instead of leaving a trail or building a map. The
+script replays only those two topics and leaves the source bag unchanged.
+
+The recorded frames are `livox_frame` and `hesai_lidar`. The viewer publishes
+the calibrated `base_link -> livox_frame` mounting transform and uses
+`base_link` as the RViz fixed frame. The Grid is therefore parallel to the
+nominal robot XY plane instead of being tilted by the MID-360's approximately
+18.3 degree mounting pitch. This is a static display frame, not gravity or
+odometry compensation for robot roll/pitch while moving.
+
+For the combined view, the script also publishes the branch's initial composed
+XT16-to-MID-360 mounting transform. It is sufficient for a first visual
+comparison, but it is not a dedicated dual-LiDAR calibration; double surfaces
+or small offsets in the overlap must not be interpreted as a sensor range
+error without calibrating the extrinsic first.
+
+The viewer deliberately accepts only the current recorder contract where both
+topics are `sensor_msgs/msg/PointCloud2`. It reports a clear error for a bag
+with a missing topic, empty topic, or older MID-360 `CustomMsg` recording.
+Useful playback options include `--rate`, `--start-offset`, `--loop`, and
+`--domain-id`; run `bash scripts/offline/view_raw_scans.sh --help` for details.
 
 For replaying a saved bag:
 
