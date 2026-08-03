@@ -3,7 +3,7 @@
 <package format="3">
   <name>fastlio_go2w_fusion</name>
   <version>0.1.0</version>
-  <description>Offline, time-aligned MID-360 and Pandar XT16 point cloud fusion for FAST-LIO.</description>
+  <description>Time-aligned offline and watchdog-protected online MID-360 and Pandar XT16 fusion for FAST-LIO.</description>
 
   <maintainer email="67k.tanaka@gmail.com">Koki Tanaka</maintainer>
   <license>MIT</license>

@@ -218,12 +218,43 @@ std::vector<FusionResult> FusionCore::drainReady()
       continue;
     }
     if (pending_mid_.size() > options_.max_pending_mid_frames) {
-      results.push_back(fuseFront(MidOnlyReason::kQueueOverflow));
+      if (options_.allow_mid_only_queue_overflow) {
+        results.push_back(fuseFront(MidOnlyReason::kQueueOverflow));
+      } else {
+        const std::uint64_t end_ns = windowEnd(pending_mid_.front());
+        pending_mid_.pop_front();
+        ++queue_overflow_drops_;
+        while (hesai_head_ < hesai_points_.size() &&
+          hesai_points_[hesai_head_].timestamp_ns <= end_ns)
+        {
+          ++hesai_head_;
+        }
+        compactHesaiBuffer();
+      }
       continue;
     }
     break;
   }
   return results;
+}
+
+BufferResetReport FusionCore::resetBuffers()
+{
+  BufferResetReport report;
+  report.pending_mid_frames = pending_mid_.size();
+  report.buffered_hesai_points = bufferedHesaiPointCount();
+  pending_mid_.clear();
+  hesai_points_.clear();
+  hesai_head_ = 0U;
+  latest_hesai_coverage_ns_ = 0U;
+  return report;
+}
+
+std::size_t FusionCore::takeQueueOverflowDrops()
+{
+  const std::size_t result = queue_overflow_drops_;
+  queue_overflow_drops_ = 0U;
+  return result;
 }
 
 std::vector<FusionResult> FusionCore::flushPendingMidOnly()

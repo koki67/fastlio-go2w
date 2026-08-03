@@ -44,6 +44,9 @@ struct FusionOptions
   std::size_t hesai_firing_stride{3U};
   double min_range_m{0.5};
   std::size_t max_pending_mid_frames{32U};
+  // Offline replay preserves the historic MID-only overflow behavior. Online
+  // strict/fallback operation disables it and lets the watchdog own fallback.
+  bool allow_mid_only_queue_overflow{true};
   RigidTransform hesai_to_livox;
 };
 
@@ -100,6 +103,13 @@ enum class MidOnlyReason : std::uint8_t
   kNone = 0U,
   kQueueOverflow = 1U,
   kFlush = 2U,
+  kWatchdogFallback = 3U,
+};
+
+struct BufferResetReport
+{
+  std::size_t pending_mid_frames{0U};
+  std::size_t buffered_hesai_points{0U};
 };
 
 struct FusionStats
@@ -140,6 +150,13 @@ public:
   // Intended for orderly end-of-bag shutdown and deterministic tests.
   std::vector<FusionResult> flushPendingMidOnly();
 
+  // Drop queued data without relaxing monotonic input timestamp checks.
+  BufferResetReport resetBuffers();
+
+  // Returns and clears the number of MID frames discarded by a strict online
+  // queue bound since the last call.
+  std::size_t takeQueueOverflowDrops();
+
   std::size_t pendingMidCount() const;
   std::size_t bufferedHesaiPointCount() const;
   bool hasHesaiCoverage(std::uint64_t window_end_ns) const;
@@ -158,6 +175,7 @@ private:
   std::uint64_t latest_hesai_coverage_ns_{0U};
   bool have_mid_timebase_{false};
   std::uint64_t last_mid_timebase_ns_{0U};
+  std::size_t queue_overflow_drops_{0U};
 };
 
 std::array<double, 9U> quaternionToRotationMatrix(const Quaternion & quaternion);

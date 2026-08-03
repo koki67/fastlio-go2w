@@ -17,7 +17,10 @@ find_package(livox_ros_driver2 REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 
-add_library(fusion_core src/fusion_core.cpp src/pointcloud_parser.cpp)
+add_library(fusion_core
+  src/fusion_core.cpp
+  src/online_watchdog.cpp
+  src/pointcloud_parser.cpp)
 target_include_directories(fusion_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
@@ -48,6 +51,9 @@ if(BUILD_TESTING)
   ament_add_gtest(test_pointcloud_parser test/test_pointcloud_parser.cpp)
   target_link_libraries(test_pointcloud_parser fusion_core)
   ament_target_dependencies(test_pointcloud_parser sensor_msgs)
+
+  ament_add_gtest(test_online_watchdog test/test_online_watchdog.cpp)
+  target_link_libraries(test_online_watchdog fusion_core)
 endif()
 
 ament_export_include_directories(include)

@@ -215,3 +215,33 @@ TEST(FusionCore, BoundedQueueFallsBackMidOnly)
   EXPECT_EQ(
     flushed.front().stats.mid_only_reason, fusion::MidOnlyReason::kFlush);
 }
+
+TEST(FusionCore, OnlineBoundedQueueDropsWithoutPublishingMidOnly)
+{
+  auto options = identityOptions();
+  options.max_pending_mid_frames = 1U;
+  options.allow_mid_only_queue_overflow = false;
+  fusion::FusionCore core(options);
+  EXPECT_TRUE(core.enqueueMid(midFrame(100U, 10U)));
+  EXPECT_TRUE(core.enqueueMid(midFrame(200U, 10U)));
+  EXPECT_TRUE(core.drainReady().empty());
+  EXPECT_EQ(core.takeQueueOverflowDrops(), 1U);
+  EXPECT_EQ(core.takeQueueOverflowDrops(), 0U);
+  EXPECT_EQ(core.pendingMidCount(), 1U);
+}
+
+TEST(FusionCore, ResetDropsBuffersButPreservesMonotonicInputGuards)
+{
+  fusion::FusionCore core(identityOptions());
+  EXPECT_TRUE(core.pushHesaiCloud(100U, {hesaiPoint(100U, 0U, 0U)}).accepted);
+  EXPECT_TRUE(core.enqueueMid(midFrame(100U, 10U)));
+  const auto reset = core.resetBuffers();
+  EXPECT_EQ(reset.pending_mid_frames, 1U);
+  EXPECT_EQ(reset.buffered_hesai_points, 1U);
+  EXPECT_EQ(core.pendingMidCount(), 0U);
+  EXPECT_EQ(core.bufferedHesaiPointCount(), 0U);
+  EXPECT_FALSE(core.pushHesaiCloud(100U, {}).accepted);
+  EXPECT_FALSE(core.enqueueMid(midFrame(100U, 10U)));
+  EXPECT_TRUE(core.pushHesaiCloud(101U, {}).accepted);
+  EXPECT_TRUE(core.enqueueMid(midFrame(101U, 10U)));
+}

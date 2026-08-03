@@ -20,7 +20,7 @@ setup(
     zip_safe=True,
     maintainer="Koki Tanaka",
     maintainer_email="67k.tanaka@gmail.com",
-    description="FAST-LIO + Livox MID-360 bringup for GO2-W.",
+    description="FAST-LIO bringup for GO2-W with MID-360 and optional XT16 fusion.",
     license="MIT",
     tests_require=["pytest", "numpy"],
 

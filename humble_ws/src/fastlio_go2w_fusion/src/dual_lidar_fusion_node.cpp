@@ -27,6 +27,7 @@
 #include "sensor_msgs/msg/point_field.hpp"
 
 #include "fastlio_go2w_fusion/fusion_core.hpp"
+#include "fastlio_go2w_fusion/online_watchdog.hpp"
 #include "fastlio_go2w_fusion/pointcloud_parser.hpp"
 
 namespace fastlio_go2w_fusion
@@ -101,6 +102,13 @@ sensor_msgs::msg::PointField makeField(
   return result;
 }
 
+std::uint64_t steadyNowNanoseconds()
+{
+  return static_cast<std::uint64_t>(
+    std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
 }  // namespace
 
 class DualLidarFusionNode : public rclcpp::Node
@@ -117,6 +125,11 @@ public:
       "diagnostics_topic", "/fastlio_go2w_fusion/diagnostics");
     const std::string debug_topic =
       declare_parameter<std::string>("debug_topic", "/livox/lidar_fused_debug");
+    fusion_profile_ = declare_parameter<std::string>("fusion_profile", "offline-custom");
+    const std::string missing_sensor_policy =
+      declare_parameter<std::string>("missing_sensor_policy", "strict");
+    online_watchdog_enabled_ =
+      declare_parameter<bool>("online_watchdog_enabled", false);
     const auto mid_stride = declare_parameter<std::int64_t>("mid_point_stride", 3);
     const auto hesai_stride = declare_parameter<std::int64_t>("hesai_firing_stride", 3);
     const auto max_pending = declare_parameter<std::int64_t>("max_pending_mid_frames", 32);
@@ -128,6 +141,12 @@ public:
       declare_parameter<double>("max_hesai_point_header_delta_sec", 1.0);
     const double pending_flush_wall_timeout_sec =
       declare_parameter<double>("pending_flush_wall_timeout_sec", 0.5);
+    const double source_stale_timeout_sec =
+      declare_parameter<double>("source_stale_timeout_sec", 0.5);
+    const double startup_grace_sec =
+      declare_parameter<double>("startup_grace_sec", 2.0);
+    const double diagnostics_period_sec =
+      declare_parameter<double>("diagnostics_period_sec", 0.1);
     partial_hesai_min_points_ =
       declare_parameter<std::int64_t>("partial_hesai_min_points", 0);
     partial_hesai_min_span_ns_ = secondsToUnsignedNanoseconds(
@@ -155,16 +174,37 @@ public:
     if (translation.size() != 3U || rotation.size() != 4U) {
       throw std::invalid_argument("extrinsic translation/rotation must have 3/4 elements");
     }
+    if (online_watchdog_enabled_) {
+      if (fusion_profile_ != "fused-matched" && fusion_profile_ != "fused-full") {
+        throw std::invalid_argument(
+                "online fusion_profile must be fused-matched or fused-full");
+      }
+      const bool matched = fusion_profile_ == "fused-matched";
+      const std::int64_t expected_mid = matched ? 6 : 1;
+      const std::int64_t expected_hesai = matched ? 22 : 1;
+      if (mid_stride != expected_mid || hesai_stride != expected_hesai) {
+        throw std::invalid_argument("online profile does not match configured fusion strides");
+      }
+      if (!std::isfinite(source_stale_timeout_sec) || source_stale_timeout_sec <= 0.0 ||
+        !std::isfinite(startup_grace_sec) || startup_grace_sec < 0.0 ||
+        !std::isfinite(diagnostics_period_sec) || diagnostics_period_sec <= 0.0)
+      {
+        throw std::invalid_argument("online watchdog durations are invalid");
+      }
+    }
 
     FusionOptions options;
     options.mid_point_stride = static_cast<std::size_t>(mid_stride);
     options.hesai_firing_stride = static_cast<std::size_t>(hesai_stride);
     options.max_pending_mid_frames = static_cast<std::size_t>(max_pending);
+    options.allow_mid_only_queue_overflow = !online_watchdog_enabled_;
     options.min_range_m = min_range_m;
     options.hesai_to_livox.translation = Vec3{translation[0], translation[1], translation[2]};
     options.hesai_to_livox.rotation =
       Quaternion{rotation[0], rotation[1], rotation[2], rotation[3]};
     core_.reset(new FusionCore(options));
+    mid_point_stride_ = static_cast<std::size_t>(mid_stride);
+    hesai_firing_stride_ = static_cast<std::size_t>(hesai_stride);
     parse_options_.time_offset_ns = secondsToSignedNanoseconds(time_offset_sec);
     parse_options_.max_point_header_delta_ns =
       secondsToUnsignedNanoseconds(max_point_delta_sec);
@@ -185,7 +225,18 @@ public:
     hesai_subscription_ = create_subscription<PointCloud2>(
       hesai_topic, input_qos,
       std::bind(&DualLidarFusionNode::onHesaiCloud, this, std::placeholders::_1));
-    if (pending_flush_wall_timeout_sec > 0.0) {
+    if (online_watchdog_enabled_) {
+      const std::uint64_t start_ns = steadyNowNanoseconds();
+      watchdog_.reset(
+        new OnlineWatchdog(
+          parseMissingSensorPolicy(missing_sensor_policy),
+          secondsToUnsignedNanoseconds(source_stale_timeout_sec),
+          secondsToUnsignedNanoseconds(startup_grace_sec), start_ns));
+      diagnostics_timer_ = create_wall_timer(
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>(diagnostics_period_sec)),
+        std::bind(&DualLidarFusionNode::onDiagnosticsTimer, this));
+    } else if (pending_flush_wall_timeout_sec > 0.0) {
       idle_flush_timeout_ = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
         std::chrono::duration<double>(pending_flush_wall_timeout_sec));
       idle_flush_timer_ = create_wall_timer(
@@ -194,8 +245,10 @@ public:
     }
 
     RCLCPP_INFO(
-      get_logger(), "Offline fusion ready: %s + %s -> %s", mid_topic.c_str(),
-      hesai_topic.c_str(), output_topic.c_str());
+      get_logger(), "%s fusion ready: %s + %s -> %s (profile=%s, policy=%s)",
+      online_watchdog_enabled_ ? "Online" : "Offline", mid_topic.c_str(),
+      hesai_topic.c_str(), output_topic.c_str(), fusion_profile_.c_str(),
+      online_watchdog_enabled_ ? toString(watchdog_->policy()) : "offline");
   }
 
 private:
@@ -213,11 +266,15 @@ private:
     std::uint64_t fused_messages_published{0U};
     std::uint64_t mid_only_fallbacks{0U};
     std::uint64_t pending_queue_overflows{0U};
+    std::uint64_t strict_queue_overflow_drops{0U};
     std::uint64_t idle_flush_frames{0U};
     std::uint64_t mid_points_output{0U};
     std::uint64_t hesai_points_output{0U};
     std::uint64_t hesai_points_stale{0U};
     std::uint64_t hesai_points_filtered{0U};
+    std::uint64_t watchdog_resets{0U};
+    std::uint64_t reset_mid_frames_dropped{0U};
+    std::uint64_t reset_hesai_points_dropped{0U};
   } counters_;
 
   static void checkPositive(const std::string & name, std::int64_t value)
@@ -237,6 +294,13 @@ private:
       finishDiagnostic(started, DiagnosticStatus::ERROR, "MID message has zero timebase");
       return;
     }
+    if (online_watchdog_enabled_ && have_online_mid_stamp_ &&
+      message->timebase <= last_online_mid_stamp_ns_)
+    {
+      ++counters_.mid_nonmonotonic_drops;
+      finishDiagnostic(started, DiagnosticStatus::WARN, "dropped non-increasing MID timebase");
+      return;
+    }
     if (message->point_num != message->points.size()) {
       ++counters_.mid_point_count_mismatches;
     }
@@ -254,12 +318,27 @@ private:
           point.offset_time, point.x, point.y, point.z, point.reflectivity,
           point.tag, point.line, PointSource::kMid360});
     }
+    if (online_watchdog_enabled_) {
+      have_online_mid_stamp_ = true;
+      last_online_mid_stamp_ns_ = message->timebase;
+      handleWatchdogUpdate(watchdog_->observeMid(steadyNowNanoseconds()), started);
+      if (watchdog_->state() != OnlineState::kHealthy &&
+        watchdog_->state() != OnlineState::kMid360Fallback)
+      {
+        finishDiagnostic(started, DiagnosticStatus::WARN, "MID frame held by online watchdog");
+        return;
+      }
+    }
     if (!core_->enqueueMid(std::move(frame))) {
       ++counters_.mid_nonmonotonic_drops;
       finishDiagnostic(started, DiagnosticStatus::WARN, "dropped non-increasing MID timebase");
       return;
     }
-    publishResults(core_->drainReady(), started);
+    if (online_watchdog_enabled_ && watchdog_->state() == OnlineState::kMid360Fallback) {
+      publishWatchdogFallback(core_->flushPendingMidOnly(), started);
+    } else {
+      publishResults(core_->drainReady(), started);
+    }
   }
 
   void onHesaiCloud(const PointCloud2::SharedPtr message)
@@ -274,6 +353,13 @@ private:
       finishDiagnostic(started, DiagnosticStatus::ERROR, "Hesai parser error: " + parsed.error);
       return;
     }
+    if (online_watchdog_enabled_ && have_online_hesai_stamp_ &&
+      parsed.adjusted_header_stamp_ns <= last_online_hesai_stamp_ns_)
+    {
+      ++counters_.hesai_nonmonotonic_drops;
+      finishDiagnostic(started, DiagnosticStatus::WARN, "dropped non-increasing Hesai cloud");
+      return;
+    }
     const std::uint64_t span_ns = hesaiSpan(parsed.points);
     const bool too_few_points =
       partial_hesai_min_points_ > 0 &&
@@ -284,6 +370,15 @@ private:
       ++counters_.hesai_partial_clouds;
     }
     counters_.hesai_invalid_points += parsed.invalid_points;
+    if (online_watchdog_enabled_) {
+      have_online_hesai_stamp_ = true;
+      last_online_hesai_stamp_ns_ = parsed.adjusted_header_stamp_ns;
+      handleWatchdogUpdate(watchdog_->observeHesai(steadyNowNanoseconds()), started);
+      if (watchdog_->state() != OnlineState::kHealthy) {
+        finishDiagnostic(started, DiagnosticStatus::WARN, "Hesai frame held by online watchdog");
+        return;
+      }
+    }
     const auto report = core_->pushHesaiCloud(
       parsed.adjusted_header_stamp_ns, std::move(parsed.points));
     if (!report.accepted) {
@@ -308,6 +403,39 @@ private:
     publishResults(core_->flushPendingMidOnly(), started);
   }
 
+  void onDiagnosticsTimer()
+  {
+    const auto started = std::chrono::steady_clock::now();
+    handleWatchdogUpdate(watchdog_->evaluate(steadyNowNanoseconds()), started);
+    finishDiagnostic(started, DiagnosticStatus::OK, "online watchdog periodic status");
+  }
+
+  void handleWatchdogUpdate(
+    const WatchdogUpdate & update,
+    const std::chrono::steady_clock::time_point & started)
+  {
+    if (!update.reset_buffers) {
+      return;
+    }
+    if (update.current == OnlineState::kMid360Fallback) {
+      publishWatchdogFallback(core_->flushPendingMidOnly(), started);
+    }
+    const auto dropped = core_->resetBuffers();
+    ++counters_.watchdog_resets;
+    counters_.reset_mid_frames_dropped += dropped.pending_mid_frames;
+    counters_.reset_hesai_points_dropped += dropped.buffered_hesai_points;
+  }
+
+  void publishWatchdogFallback(
+    std::vector<FusionResult> results,
+    const std::chrono::steady_clock::time_point & started)
+  {
+    for (auto & result : results) {
+      result.stats.mid_only_reason = MidOnlyReason::kWatchdogFallback;
+    }
+    publishResults(results, started);
+  }
+
   static std::uint64_t hesaiSpan(const std::vector<HesaiPoint> & points)
   {
     if (points.empty()) {
@@ -324,6 +452,7 @@ private:
     const std::vector<FusionResult> & results,
     const std::chrono::steady_clock::time_point & started)
   {
+    counters_.strict_queue_overflow_drops += core_->takeQueueOverflowDrops();
     if (results.empty()) {
       finishDiagnostic(started, DiagnosticStatus::OK, "waiting for complete Hesai coverage");
       return;
@@ -342,6 +471,8 @@ private:
         } else if (result.stats.mid_only_reason == MidOnlyReason::kQueueOverflow) {
           ++counters_.pending_queue_overflows;
           diagnostic_message = "MID-only queue fallback";
+        } else if (result.stats.mid_only_reason == MidOnlyReason::kWatchdogFallback) {
+          diagnostic_message = "MID-only watchdog fallback";
         } else {
           diagnostic_message = "MID-only fallback";
         }
@@ -433,10 +564,39 @@ private:
     diagnostic_msgs::msg::DiagnosticArray array;
     array.header.stamp = now();
     DiagnosticStatus status;
+    if (online_watchdog_enabled_) {
+      switch (watchdog_->state()) {
+        case OnlineState::kHealthy:
+          level = std::max(level, static_cast<std::uint8_t>(DiagnosticStatus::OK));
+          break;
+        case OnlineState::kStartup:
+        case OnlineState::kMid360Fallback:
+        case OnlineState::kRecovering:
+          level = std::max(level, static_cast<std::uint8_t>(DiagnosticStatus::WARN));
+          break;
+        case OnlineState::kStrictStopped:
+          level = std::max(level, static_cast<std::uint8_t>(DiagnosticStatus::ERROR));
+          break;
+      }
+    }
     status.level = level;
     status.name = get_fully_qualified_name() + std::string(": fusion");
-    status.hardware_id = "offline_mid360_pandar_xt16";
-    status.message = message;
+    status.hardware_id = online_watchdog_enabled_ ?
+      "online_mid360_pandar_xt16" : "offline_mid360_pandar_xt16";
+    status.message = online_watchdog_enabled_ ?
+      std::string(toString(watchdog_->state())) + ": " + message : message;
+    addStringValue(status, "profile", fusion_profile_);
+    addStringValue(
+      status, "policy", online_watchdog_enabled_ ? toString(watchdog_->policy()) : "offline");
+    addStringValue(
+      status, "state", online_watchdog_enabled_ ? toString(watchdog_->state()) : "offline");
+    addValue(status, "mid_point_stride", mid_point_stride_);
+    addValue(status, "hesai_firing_stride", hesai_firing_stride_);
+    if (online_watchdog_enabled_) {
+      const std::uint64_t now_ns = steadyNowNanoseconds();
+      addValue(status, "mid_age_sec", watchdog_->midAgeSeconds(now_ns));
+      addValue(status, "hesai_age_sec", watchdog_->hesaiAgeSeconds(now_ns));
+    }
     addValue(status, "mid_messages_received", counters_.mid_messages_received);
     addValue(status, "mid_nonmonotonic_drops", counters_.mid_nonmonotonic_drops);
     addValue(status, "mid_point_count_mismatches", counters_.mid_point_count_mismatches);
@@ -449,11 +609,15 @@ private:
     addValue(status, "fused_messages_published", counters_.fused_messages_published);
     addValue(status, "mid_only_fallbacks", counters_.mid_only_fallbacks);
     addValue(status, "pending_queue_overflows", counters_.pending_queue_overflows);
+    addValue(status, "strict_queue_overflow_drops", counters_.strict_queue_overflow_drops);
     addValue(status, "idle_flush_frames", counters_.idle_flush_frames);
     addValue(status, "mid_points_output", counters_.mid_points_output);
     addValue(status, "hesai_points_output", counters_.hesai_points_output);
     addValue(status, "hesai_points_stale", counters_.hesai_points_stale);
     addValue(status, "hesai_points_filtered", counters_.hesai_points_filtered);
+    addValue(status, "watchdog_resets", counters_.watchdog_resets);
+    addValue(status, "reset_mid_frames_dropped", counters_.reset_mid_frames_dropped);
+    addValue(status, "reset_hesai_points_dropped", counters_.reset_hesai_points_dropped);
     addValue(status, "pending_mid_frames", core_->pendingMidCount());
     addValue(status, "buffered_hesai_points", core_->bufferedHesaiPointCount());
     diagnostic_msgs::msg::KeyValue processing;
@@ -473,13 +637,31 @@ private:
     status.values.push_back(entry);
   }
 
+  static void addStringValue(
+    DiagnosticStatus & status, const std::string & key, const std::string & value)
+  {
+    diagnostic_msgs::msg::KeyValue entry;
+    entry.key = key;
+    entry.value = value;
+    status.values.push_back(entry);
+  }
+
   HesaiParseOptions parse_options_;
   std::unique_ptr<FusionCore> core_;
+  std::unique_ptr<OnlineWatchdog> watchdog_;
   std::chrono::steady_clock::time_point last_input_wall_time_{
     std::chrono::steady_clock::now()};
   std::chrono::steady_clock::duration idle_flush_timeout_{
     std::chrono::steady_clock::duration::zero()};
   bool publish_debug_cloud_{false};
+  bool online_watchdog_enabled_{false};
+  bool have_online_mid_stamp_{false};
+  bool have_online_hesai_stamp_{false};
+  std::uint64_t last_online_mid_stamp_ns_{0U};
+  std::uint64_t last_online_hesai_stamp_ns_{0U};
+  std::size_t mid_point_stride_{0U};
+  std::size_t hesai_firing_stride_{0U};
+  std::string fusion_profile_{"offline-custom"};
   std::int64_t partial_hesai_min_points_{50000};
   std::uint64_t partial_hesai_min_span_ns_{80000000U};
   double last_processing_time_ms_{0.0};
@@ -490,6 +672,7 @@ private:
   rclcpp::Subscription<LivoxMessage>::SharedPtr mid_subscription_;
   rclcpp::Subscription<PointCloud2>::SharedPtr hesai_subscription_;
   rclcpp::TimerBase::SharedPtr idle_flush_timer_;
+  rclcpp::TimerBase::SharedPtr diagnostics_timer_;
 };
 
 }  // namespace fastlio_go2w_fusion

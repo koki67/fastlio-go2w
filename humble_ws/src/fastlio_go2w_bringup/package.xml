@@ -20,6 +20,7 @@
   <depend>tf2_geometry_msgs</depend>
   <depend>fast_lio</depend>
   <exec_depend>fastlio_go2w_fusion</exec_depend>
+  <exec_depend>hesai_lidar</exec_depend>
   <depend>livox_ros_driver2</depend>
   <exec_depend>fastlio_go2w_livox</exec_depend>
   <depend>go2w_description</depend>
