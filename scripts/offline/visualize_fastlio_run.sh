@@ -8,7 +8,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PUBLISHER="$SCRIPT_DIR/publish_fastlio_artifacts.py"
 REPLAYER="$SCRIPT_DIR/replay_fastlio_artifacts.py"
 ALIGNER="$SCRIPT_DIR/publish_offline_frame_alignment.py"
-CALIBRATION="$REPO_ROOT/config/sensor/go2w_mid360_calibration.yaml"
+CALIBRATION_RESOLVER="$SCRIPT_DIR/resolve_fastlio_run_calibration.py"
 RVIZ_CONFIG="$SCRIPT_DIR/rviz/offline_result.rviz"
 
 usage() {
@@ -24,7 +24,8 @@ Options:
 
 Static mode publishes the frozen preview map and matching-frame trajectory.
 Dynamic mode starts empty, incrementally voxelizes saved /cloud_registered
-scans, and extends the path from saved /odom. Neither mode runs FAST-LIO.
+scans, and extends the path from saved /odom. The run's saved sensor calibration
+is used for RViz frame alignment. Neither mode runs FAST-LIO.
 EOF
 }
 
@@ -76,8 +77,18 @@ RUN_DIR="$(realpath -m "$RUN_DIR")"
 [ -f "$PUBLISHER" ] || die "artifact publisher not found: $PUBLISHER"
 [ -f "$REPLAYER" ] || die "dynamic replay publisher not found: $REPLAYER"
 [ -f "$ALIGNER" ] || die "offline frame alignment publisher not found: $ALIGNER"
-[ -f "$CALIBRATION" ] || die "sensor calibration not found: $CALIBRATION"
+[ -f "$CALIBRATION_RESOLVER" ] \
+    || die "run calibration resolver not found: $CALIBRATION_RESOLVER"
 [ -f "$RVIZ_CONFIG" ] || die "RViz config not found: $RVIZ_CONFIG"
+
+CALIBRATION_RECORD="$(python3 "$CALIBRATION_RESOLVER" "$RUN_DIR")" \
+    || die "could not resolve run sensor calibration"
+CALIBRATION_SOURCE="${CALIBRATION_RECORD%%$'\t'*}"
+CALIBRATION="${CALIBRATION_RECORD#*$'\t'}"
+if [ "$CALIBRATION_SOURCE" != "run snapshot" ]; then
+    echo "Warning: saved sensor calibration is absent; using $CALIBRATION_SOURCE." >&2
+fi
+[ -f "$CALIBRATION" ] || die "sensor calibration not found: $CALIBRATION"
 
 if [ -f /opt/ros/humble/setup.bash ]; then
     set +u
@@ -189,6 +200,7 @@ trap 'exit 130' INT TERM
 
 echo "Run: $RUN_DIR"
 echo "Workspace: $WORKSPACE_SETUP"
+echo "Sensor calibration ($CALIBRATION_SOURCE): $CALIBRATION"
 ALIGNMENT_CMD=(python3 "$ALIGNER" --calibration "$CALIBRATION")
 echo "Starting base-aligned offline frame publisher..."
 setsid "${ALIGNMENT_CMD[@]}" &

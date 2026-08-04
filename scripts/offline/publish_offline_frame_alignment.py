@@ -179,7 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--calibration",
         type=Path,
         default=DEFAULT_CALIBRATION,
-        help="GO2-W MID-360 calibration YAML",
+        help="GO2-W sensor calibration YAML",
     )
     output = parser.add_mutually_exclusive_group()
     output.add_argument("--print-fixed-frame-id", action="store_true")
